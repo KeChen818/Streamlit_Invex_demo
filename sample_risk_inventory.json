@@ -1,0 +1,98 @@
+[
+  {
+    "group_id": "RISK-001",
+    "business_division": "Investment Bank",
+    "legal_entity": "US Broker Dealer",
+    "risk_category": "Market Risk",
+    "risk_name": "Equity derivatives volatility spike",
+    "risk_description": "Potential loss from sudden volatility moves affecting structured equity and hedging positions.",
+    "likelihood": "Medium",
+    "impact": "High",
+    "status": "Approved",
+    "owner": "Market Risk Officer"
+  },
+  {
+    "group_id": "RISK-002",
+    "business_division": "Investment Bank",
+    "legal_entity": "US Branch",
+    "risk_category": "Credit Risk",
+    "risk_name": "Counterparty downgrade exposure",
+    "risk_description": "Exposure to deteriorating counterparties may increase margin calls and replacement cost.",
+    "likelihood": "Medium",
+    "impact": "Critical",
+    "status": "Pending Approval",
+    "owner": "Credit Risk Officer"
+  },
+  {
+    "group_id": "RISK-003",
+    "business_division": "Asset Management",
+    "legal_entity": "Asset Management LLC",
+    "risk_category": "Liquidity Risk",
+    "risk_name": "Private credit redemption pressure",
+    "risk_description": "Investor redemptions may create liquidity mismatch in less liquid private credit holdings.",
+    "likelihood": "High",
+    "impact": "High",
+    "status": "Approved",
+    "owner": "Liquidity Risk Lead"
+  },
+  {
+    "group_id": "RISK-004",
+    "business_division": "Wealth Management",
+    "legal_entity": "US Broker Dealer",
+    "risk_category": "Operational Risk",
+    "risk_name": "Client reporting data quality issue",
+    "risk_description": "Incorrect aggregation logic may create inconsistent client reporting across platforms.",
+    "likelihood": "Medium",
+    "impact": "Medium",
+    "status": "Approved",
+    "owner": "Operations Control"
+  },
+  {
+    "group_id": "RISK-005",
+    "business_division": "Investment Bank",
+    "legal_entity": "US Broker Dealer",
+    "risk_category": "Model Risk",
+    "risk_name": "AI-assisted risk classification drift",
+    "risk_description": "LLM-driven classification may drift from approved taxonomy without monitoring and human review.",
+    "likelihood": "High",
+    "impact": "High",
+    "status": "Pending Approval",
+    "owner": "Model Risk Manager"
+  },
+  {
+    "group_id": "RISK-006",
+    "business_division": "Corporate Treasury",
+    "legal_entity": "Holding Company",
+    "risk_category": "Interest Rate Risk",
+    "risk_name": "Deposit beta repricing uncertainty",
+    "risk_description": "Changing rate environment may affect funding cost assumptions and net interest income sensitivity.",
+    "likelihood": "Medium",
+    "impact": "High",
+    "status": "Approved",
+    "owner": "Treasury Risk"
+  },
+  {
+    "group_id": "RISK-007",
+    "business_division": "Asset Management",
+    "legal_entity": "Asset Management LLC",
+    "risk_category": "Valuation Risk",
+    "risk_name": "Private asset valuation lag",
+    "risk_description": "Illiquid asset marks may lag public market moves and create investor reporting concerns.",
+    "likelihood": "Medium",
+    "impact": "High",
+    "status": "Under Review",
+    "owner": "Valuation Control"
+  },
+  {
+    "group_id": "RISK-008",
+    "business_division": "Technology",
+    "legal_entity": "Shared Services",
+    "risk_category": "Cyber Risk",
+    "risk_name": "Third-party SaaS outage",
+    "risk_description": "Dependency on external SaaS tooling may disrupt business workflows and risk reporting timelines.",
+    "likelihood": "Medium",
+    "impact": "Medium",
+    "status": "Approved",
+    "owner": "Technology Risk"
+  }
+]
