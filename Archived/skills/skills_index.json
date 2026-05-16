@@ -1,0 +1,70 @@
+{
+  "summarize_profile": {
+    "title": "Summarize Risk Profile",
+    "file": "summarize_profile.md",
+    "priority": 20,
+    "triggers": [
+      "summarize profile",
+      "risk profile",
+      "profile summary",
+      "summarize risks",
+      "overview",
+      "top risks"
+    ]
+  },
+  "qoq_compare": {
+    "title": "QoQ Risk Comparison",
+    "file": "qoq_compare.md",
+    "priority": 30,
+    "triggers": [
+      "qoq",
+      "quarter over quarter",
+      "compare change",
+      "rating change",
+      "materiality change",
+      "movement",
+      "changed from previous quarter"
+    ]
+  },
+  "materiality_review": {
+    "title": "Materiality Review",
+    "file": "materiality_review.md",
+    "priority": 25,
+    "triggers": [
+      "material",
+      "materiality",
+      "non-material",
+      "non material",
+      "material risks",
+      "materiality rationale"
+    ]
+  },
+  "taxonomy_mapping": {
+    "title": "Taxonomy Mapping",
+    "file": "taxonomy_mapping.md",
+    "priority": 20,
+    "triggers": [
+      "taxonomy",
+      "l0",
+      "l1",
+      "l2",
+      "risk type",
+      "category",
+      "classification",
+      "mapping"
+    ]
+  },
+  "executive_brief": {
+    "title": "Executive Brief",
+    "file": "executive_brief.md",
+    "priority": 15,
+    "triggers": [
+      "executive",
+      "committee",
+      "senior management",
+      "brief",
+      "management summary",
+      "risk committee"
+    ]
+  }
+}
