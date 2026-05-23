@@ -62,6 +62,7 @@ STOP_WORDS = {
     "method",
     "metric",
     "taxonomy",
+    "variant",
 }
 
 ACRONYMS = {
@@ -80,11 +81,17 @@ ACRONYMS = {
     "wm",
 }
 
-ROOT_CAUSE_COLUMNS = [
+ROOT_CAUSE_LEVEL_COLUMNS = [
     "Root_Cause_L0",
     "Root_Cause_L1",
+]
+
+ROOT_CAUSE_DETAIL_COLUMNS = [
     "Root_Cause_Comment",
     "Early_Warning_Sign(EWS)",
+]
+
+ROOT_CAUSE_FALLBACK_COLUMNS = [
     "Risk_Exposure",
 ]
 
@@ -97,13 +104,46 @@ def field_text(row: pd.Series, column: str) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+def root_cause_level(row: pd.Series) -> str:
+    """Return the L0/L1 root-cause classification for theme grouping."""
+    values = [field_text(row, column) for column in ROOT_CAUSE_LEVEL_COLUMNS]
+    values = [value for value in values if value]
+    return " / ".join(dict.fromkeys(values))
+
+
 def root_cause_driver(row: pd.Series) -> str:
-    """Return the best available root-cause driver field for a risk row."""
-    for column in ROOT_CAUSE_COLUMNS:
+    """Return root-cause context for embeddings and theme detail summaries."""
+    values = [root_cause_level(row)]
+    values.extend(field_text(row, column) for column in ROOT_CAUSE_DETAIL_COLUMNS)
+    values = [value for value in values if value]
+    if values:
+        return " | ".join(dict.fromkeys(values))
+
+    for column in ROOT_CAUSE_FALLBACK_COLUMNS:
         value = field_text(row, column)
         if value:
             return value
     return ""
+
+
+def root_cause_evidence(row: pd.Series) -> str:
+    """Return comment/EWS evidence without using it as a theme split key."""
+    values = [field_text(row, column) for column in ROOT_CAUSE_DETAIL_COLUMNS]
+    values = [value for value in values if value]
+    if values:
+        return " | ".join(dict.fromkeys(values))
+
+    for column in ROOT_CAUSE_FALLBACK_COLUMNS:
+        value = field_text(row, column)
+        if value:
+            return value
+    return ""
+
+
+def clean_risk_title(row: pd.Series) -> str:
+    """Remove scenario numbering from a risk title before semantic matching."""
+    clean_title = re.sub(r"\bscenario\s*\d+\b", "", field_text(row, "Risk_Title"), flags=re.IGNORECASE)
+    return re.sub(r"\b\d+\b", "", clean_title).strip()
 
 
 def build_semantic_payload(row: pd.Series) -> str:
@@ -112,8 +152,7 @@ def build_semantic_payload(row: pd.Series) -> str:
     Titles are deliberately down-weighted because executive themes should be
     driven by risk description, taxonomy, and root-cause driver patterns.
     """
-    clean_title = re.sub(r"\bscenario\s*\d+\b", "", field_text(row, "Risk_Title"), flags=re.IGNORECASE)
-    clean_title = re.sub(r"\b\d+\b", "", clean_title).strip()
+    clean_title = clean_risk_title(row)
     taxonomy = f'{field_text(row, "Taxonomy_L1")} / {field_text(row, "Taxonomy_L2")}'
     description = field_text(row, "Risk_Description")
     root_cause = root_cause_driver(row)
@@ -167,6 +206,106 @@ def semantic_keywords(text: str, limit: int = 6) -> str:
     if not tokens:
         return ""
     return " ".join(token for token, _ in Counter(tokens).most_common(limit))
+
+
+def title_description_tokens(row: pd.Series) -> list[str]:
+    """Tokenize title and description for shared topic extraction."""
+    text = f'{clean_risk_title(row)} {field_text(row, "Risk_Description")}'
+    return [
+        token
+        for token in tokenize(text)
+        if len(token) > 2 and not re.search(r"\d", token)
+    ]
+
+
+def title_description_sections(row: pd.Series) -> list[list[str]]:
+    """Tokenize title and description separately to avoid cross-boundary phrases."""
+    sections = [clean_risk_title(row), field_text(row, "Risk_Description")]
+    return [
+        [token for token in tokenize(section) if len(token) > 2 and not re.search(r"\d", token)]
+        for section in sections
+    ]
+
+
+def common_topic(theme_data: pd.DataFrame, limit: int = 4) -> str:
+    """Extract a repeated title/description topic from a group of risks."""
+    if theme_data.empty or len(theme_data) < 2:
+        return ""
+
+    rows = [row for _, row in theme_data.iterrows()]
+    documents = []
+    for row in rows:
+        tokens = title_description_tokens(row)
+        if tokens:
+            documents.append((row, tokens))
+    docs = [tokens for _, tokens in documents]
+    if len(docs) < 2:
+        return ""
+
+    minimum_documents = max(2, math.ceil(len(docs) * 0.30))
+    token_document_frequency: Counter[str] = Counter()
+    phrase_document_frequency: Counter[str] = Counter()
+    for row, tokens in documents:
+        token_document_frequency.update(set(tokens))
+        phrases = set()
+        for section in title_description_sections(row):
+            for width in (3, 2):
+                for index in range(max(len(section) - width + 1, 0)):
+                    phrase_tokens = section[index : index + width]
+                    if len(set(phrase_tokens)) != len(phrase_tokens):
+                        continue
+                    phrase = " ".join(phrase_tokens)
+                    if not any(piece in STOP_WORDS for piece in phrase_tokens):
+                        phrases.add(phrase)
+        phrase_document_frequency.update(phrases)
+
+    phrase_candidates = [
+        (phrase, count)
+        for phrase, count in phrase_document_frequency.items()
+        if count >= minimum_documents
+    ]
+    if phrase_candidates:
+        phrase_candidates.sort(key=lambda item: (item[1], len(item[0].split()), item[0]), reverse=True)
+        return phrase_candidates[0][0]
+
+    token_candidates = [
+        (token, count)
+        for token, count in token_document_frequency.items()
+        if count >= minimum_documents
+    ]
+    token_candidates.sort(key=lambda item: (item[1], item[0]), reverse=True)
+    return " ".join(token for token, _ in token_candidates[:limit])
+
+
+def topic_adds_signal(topic: str, base_text: str) -> bool:
+    """Check whether a common topic adds information beyond taxonomy/root-cause."""
+    topic_tokens = set(tokenize(topic))
+    base_tokens = set(tokenize(base_text))
+    return bool(topic_tokens - base_tokens)
+
+
+def taxonomy_l2_is_broad(value: str) -> bool:
+    """Identify generic taxonomy values where title/description should refine themes."""
+    clean = str(value or "").strip().lower()
+    if not clean:
+        return True
+    return clean in {
+        "general",
+        "miscellaneous",
+        "not mapped",
+        "other",
+        "unmapped",
+        "operational risk",
+        "business risk",
+        "emerging risk",
+    }
+
+
+def topic_should_split_theme(taxonomy_l2: str, root_keywords: str, topic: str, base_text: str) -> bool:
+    """Use common topic as a split key only when it is stable and needed."""
+    if not topic or not topic_adds_signal(topic, base_text):
+        return False
+    return bool(root_keywords) or taxonomy_l2_is_broad(taxonomy_l2)
 
 
 def token_bucket(token: str, dimensions: int) -> int:
@@ -393,17 +532,21 @@ def cluster_theme_signature(data: pd.DataFrame, cluster: list[str]) -> str:
     theme_data = data[data["Group_ID"].astype(str).isin(cluster)]
     taxonomy_l1 = dominant_value(theme_data["Taxonomy_L1"])
     taxonomy_l2 = dominant_value(theme_data["Taxonomy_L2"])
-    root_cause_text = " ".join(theme_data.apply(root_cause_driver, axis=1).tolist())
-    description_text = " ".join(theme_data["Risk_Description"].dropna().astype(str).tolist())
+    root_cause_text = " ".join(theme_data.apply(root_cause_level, axis=1).tolist())
     root_keywords = semantic_keywords(root_cause_text, limit=5)
-    description_keywords = semantic_keywords(description_text, limit=5)
+    shared_topic = common_topic(theme_data)
     if taxonomy_l1 or taxonomy_l2:
-        return normalize_signature(f"{taxonomy_l1}|{taxonomy_l2}|{root_keywords or description_keywords}")
+        signature_parts = [taxonomy_l1, taxonomy_l2]
+        if root_keywords:
+            signature_parts.append(root_keywords)
+        if topic_should_split_theme(taxonomy_l2, root_keywords, shared_topic, "|".join(signature_parts)):
+            signature_parts.append(shared_topic)
+        return normalize_signature("|".join(signature_parts))
 
     fallback = "|".join(
         [
             root_keywords,
-            description_keywords,
+            shared_topic,
             dominant_value(theme_data["Business_Division"]),
         ]
     )
@@ -500,16 +643,22 @@ def build_theme_records(
     for index, cluster in enumerate(clusters, start=1):
         theme_data = data[data["Group_ID"].astype(str).isin(cluster)].copy()
         dominant_l2 = dominant_value(theme_data["Taxonomy_L2"])
-        dominant_root_cause = dominant_value(theme_data.apply(root_cause_driver, axis=1))
+        dominant_root_cause_level = dominant_value(theme_data.apply(root_cause_level, axis=1))
         dominant_metric = dominant_value(theme_data["Risk_Metric"])
         dominant_method = dominant_value(theme_data["Assessment_Method"])
         dominant_division = dominant_value(theme_data["Business_Division"])
         dominant_l1 = dominant_value(theme_data["Taxonomy_L1"])
-        label_source = dominant_l2 or dominant_l1 or dominant_root_cause
+        shared_topic = common_topic(theme_data)
+        label_source = dominant_l2 or dominant_l1 or dominant_root_cause_level
         theme_name = format_theme_label(label_source)
-        root_fragment = title_fragment(dominant_root_cause)
+        root_fragment = title_fragment(dominant_root_cause_level)
         if root_fragment and root_fragment.lower() not in theme_name.lower():
             theme_name = f"{theme_name} - {root_fragment}"
+        topic_fragment = title_fragment(shared_topic)
+        base_label_text = f"{theme_name} {dominant_l1} {dominant_l2} {dominant_root_cause_level}"
+        root_keywords = semantic_keywords(dominant_root_cause_level, limit=5)
+        if topic_fragment and topic_should_split_theme(dominant_l2, root_keywords, topic_fragment, base_label_text):
+            theme_name = f"{theme_name} - {topic_fragment}"
         taxonomies = sorted(
             {
                 value
@@ -523,7 +672,8 @@ def build_theme_records(
         divisions = sorted(theme_data["Business_Division"].dropna().astype(str).unique().tolist())
         metrics = unique_join(theme_data["Risk_Metric"], limit=4)
         methods = unique_join(theme_data["Assessment_Method"], limit=3)
-        root_causes = unique_join(theme_data.apply(root_cause_driver, axis=1), limit=3)
+        root_causes = unique_join(theme_data.apply(root_cause_level, axis=1), limit=3)
+        root_evidence = unique_join(theme_data.apply(root_cause_evidence, axis=1), limit=3)
         taxonomy_l2_values = unique_join(theme_data["Taxonomy_L2"], limit=3)
         avg_similarity = average_internal_similarity(cluster, relationships)
         cross_business = len(divisions) > 1
@@ -533,15 +683,17 @@ def build_theme_records(
             {
                 "Theme_ID": f"THM_{index:03d}",
                 "Theme_Name": theme_name,
-                "Primary_Driver": dominant_root_cause,
+                "Primary_Driver": dominant_root_cause_level,
                 "Primary_Taxonomy_L1": dominant_l1,
                 "Primary_Taxonomy_L2": dominant_l2,
                 "Primary_Metric": dominant_metric,
                 "Primary_Method": dominant_method,
                 "Primary_Division": dominant_division,
+                "Common_Topic": shared_topic,
                 "Theme_Summary": (
-                    f"Risks related to {taxonomy_l2_values} with root-cause drivers including "
-                    f"{root_causes}. Business divisions include "
+                    f"Risks related to {taxonomy_l2_values}. Common title/description topic: "
+                    f"{shared_topic or 'not enough repeated wording'}. Root-cause levels include "
+                    f"{root_causes}. Evidence includes {root_evidence}. Business divisions include "
                     f"{', '.join(divisions) if divisions else 'none'}. Supporting metrics include "
                     f"{metrics}; assessment methods include {methods}."
                 ),

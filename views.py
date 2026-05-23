@@ -224,6 +224,7 @@ def render_theme_review_editor(themes: pd.DataFrame) -> None:
                 "Risk Count": theme["Risk_Count"],
                 "Business Divisions": format_list_cell(theme["Business_Divisions"]),
                 "Taxonomy Alignment": format_list_cell(theme["Taxonomy_Alignment"]),
+                "Common Topic": theme.get("Common_Topic", ""),
                 "Risk IDs": format_list_cell(theme["Risk_IDs"]),
                 "Emerging": theme["Emerging_Indicator"],
                 "Potential Gap": theme["Potential_Gap"],
@@ -243,6 +244,7 @@ def render_theme_review_editor(themes: pd.DataFrame) -> None:
             "Risk Count",
             "Business Divisions",
             "Taxonomy Alignment",
+            "Common Topic",
             "Risk IDs",
             "Emerging",
             "Potential Gap",
@@ -285,6 +287,8 @@ def render_theme_detail_cards(data: pd.DataFrame, themes: pd.DataFrame) -> None:
             cols[1].metric("Divisions", f"{len(theme['Business_Divisions'])}")
             cols[2].metric("Taxonomy L1", f"{theme_risks['Taxonomy_L1'].nunique()}")
             cols[3].metric("Metrics", f"{theme_risks['Risk_Metric'].nunique()}")
+            if theme.get("Common_Topic"):
+                st.markdown(f"**Common topic:** {escape(str(theme['Common_Topic']))}", unsafe_allow_html=True)
             st.markdown(f"**Potential gap:** {escape(theme['Potential_Gap'])}", unsafe_allow_html=True)
             render_risk_table(theme_risks)
 
