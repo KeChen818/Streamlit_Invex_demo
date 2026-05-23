@@ -302,7 +302,7 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
     control_1, control_2, control_3 = st.columns(3)
     with control_1:
         target_theme_count = st.slider(
-            "Target themes",
+            "Target themes (max)",
             min_value=1,
             max_value=max(1, min(60, record_count)),
             value=max(1, default_target),

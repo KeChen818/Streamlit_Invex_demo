@@ -359,6 +359,40 @@ def cluster_risks_to_target(
     return sorted(clusters, key=lambda values: (-len(values), values[0]))
 
 
+def normalize_signature(value: str) -> str:
+    """Normalize a field into a stable duplicate-theme signature."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def cluster_theme_signature(data: pd.DataFrame, cluster: list[str]) -> str:
+    """Build the driver/metric signature used to merge duplicate themes."""
+    theme_data = data[data["Group_ID"].astype(str).isin(cluster)]
+    driver = dominant_value(theme_data["Taxonomy_L2"])
+    metric = dominant_value(theme_data["Risk_Metric"])
+    if driver:
+        return normalize_signature(f"{driver}|{metric}")
+
+    fallback = "|".join(
+        [
+            dominant_value(theme_data["Taxonomy_L1"]),
+            metric,
+            dominant_value(theme_data["Assessment_Method"]),
+        ]
+    )
+    return normalize_signature(fallback) or "|".join(cluster)
+
+
+def merge_duplicate_theme_clusters(data: pd.DataFrame, clusters: list[list[str]]) -> list[list[str]]:
+    """Merge clusters that map to the same suggested theme signature."""
+    merged: dict[str, list[str]] = {}
+    for cluster in clusters:
+        signature = cluster_theme_signature(data, cluster)
+        merged.setdefault(signature, []).extend(cluster)
+
+    unique_clusters = [sorted(set(cluster)) for cluster in merged.values()]
+    return sorted(unique_clusters, key=lambda values: (-len(values), values[0]))
+
+
 def format_theme_label(value: str) -> str:
     """Convert taxonomy or metric text into a concise theme label."""
     clean = re.sub(r"\s+", " ", str(value or "").replace("_", " ")).strip()
@@ -431,6 +465,8 @@ def build_theme_records(
         theme_data = data[data["Group_ID"].astype(str).isin(cluster)].copy()
         dominant_l2 = dominant_value(theme_data["Taxonomy_L2"])
         dominant_metric = dominant_value(theme_data["Risk_Metric"])
+        dominant_method = dominant_value(theme_data["Assessment_Method"])
+        dominant_division = dominant_value(theme_data["Business_Division"])
         dominant_l1 = dominant_value(theme_data["Taxonomy_L1"])
         label_source = dominant_l2 or dominant_metric or dominant_l1
         theme_name = format_theme_label(label_source)
@@ -453,6 +489,10 @@ def build_theme_records(
             {
                 "Theme_ID": f"THM_{index:03d}",
                 "Theme_Name": theme_name,
+                "Primary_Driver": dominant_l2,
+                "Primary_Metric": dominant_metric,
+                "Primary_Method": dominant_method,
+                "Primary_Division": dominant_division,
                 "Theme_Summary": (
                     f"Risks related to {drivers}. Business divisions include "
                     f"{', '.join(divisions) if divisions else 'none'}. Metrics include {metrics}; "
@@ -477,7 +517,42 @@ def build_theme_records(
             }
         )
 
-    return pd.DataFrame(theme_records)
+    themes = pd.DataFrame(theme_records)
+    return uniquify_theme_names(themes)
+
+
+def differentiator_for_theme(row: pd.Series) -> str:
+    """Choose a concise suffix when otherwise similar theme names remain."""
+    metric = str(row.get("Primary_Metric") or "").strip()
+    division = str(row.get("Primary_Division") or "").strip()
+    method = str(row.get("Primary_Method") or "").strip()
+
+    if metric:
+        return metric
+    if division:
+        return division
+    return method
+
+
+def uniquify_theme_names(themes: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the review table does not show repeated suggested theme names."""
+    if themes.empty or not themes["Theme_Name"].duplicated().any():
+        return themes
+
+    themes = themes.copy()
+    for theme_name, rows in themes.groupby("Theme_Name"):
+        if len(rows) == 1:
+            continue
+
+        used_suffixes: set[str] = set()
+        for index, row in rows.iterrows():
+            suffix = differentiator_for_theme(row)
+            if not suffix or suffix in used_suffixes:
+                suffix = f"Cluster {len(used_suffixes) + 1}"
+            used_suffixes.add(suffix)
+            themes.at[index, "Theme_Name"] = f"{theme_name} - {suffix}"
+
+    return themes
 
 
 def build_quarter_theme_summary(data: pd.DataFrame, themes: pd.DataFrame) -> pd.DataFrame:
@@ -520,6 +595,7 @@ def build_theme_classification(
         clusters = cluster_risks_to_target(risk_ids, embeddings, target_theme_count)
     else:
         clusters = cluster_risks(risk_ids, relationships, cluster_threshold)
+    clusters = merge_duplicate_theme_clusters(scoped, clusters)
     themes = build_theme_records(scoped, clusters, relationships)
     quarter_summary = build_quarter_theme_summary(scoped, themes)
     return themes, relationships, quarter_summary
