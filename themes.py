@@ -80,6 +80,14 @@ ACRONYMS = {
     "wm",
 }
 
+ROOT_CAUSE_COLUMNS = [
+    "Root_Cause_Driver",
+    "Root_Cause",
+    "Risk_Driver",
+    "Cause_Driver",
+    "Risk_Exposure",
+]
+
 
 def field_text(row: pd.Series, column: str) -> str:
     """Return a clean string field value from a risk row."""
@@ -89,20 +97,31 @@ def field_text(row: pd.Series, column: str) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+def root_cause_driver(row: pd.Series) -> str:
+    """Return the best available root-cause driver field for a risk row."""
+    for column in ROOT_CAUSE_COLUMNS:
+        value = field_text(row, column)
+        if value:
+            return value
+    return ""
+
+
 def build_semantic_payload(row: pd.Series) -> str:
     """Build a weighted semantic payload used for theme similarity.
 
     Titles are deliberately down-weighted because executive themes should be
-    driven by risk driver, taxonomy, metric, method, and description patterns.
+    driven by risk description, taxonomy, and root-cause driver patterns.
     """
     clean_title = re.sub(r"\bscenario\s*\d+\b", "", field_text(row, "Risk_Title"), flags=re.IGNORECASE)
     clean_title = re.sub(r"\b\d+\b", "", clean_title).strip()
     taxonomy = f'{field_text(row, "Taxonomy_L1")} / {field_text(row, "Taxonomy_L2")}'
+    description = field_text(row, "Risk_Description")
+    root_cause = root_cause_driver(row)
     high_weight_sections = [
+        field_text(row, "Taxonomy_L1"),
         field_text(row, "Taxonomy_L2"),
-        field_text(row, "Risk_Metric"),
-        field_text(row, "Assessment_Method"),
-        field_text(row, "Risk_Exposure"),
+        root_cause,
+        description,
     ]
     return f"""
 Theme Signals:
@@ -113,12 +132,14 @@ Risk Name:
 {clean_title}
 
 Risk Description:
-{field_text(row, "Risk_Description")}
-{field_text(row, "Risk_Description")}
+{description}
+{description}
+{description}
 
-Risk Driver:
-{field_text(row, "Risk_Exposure")}
-{field_text(row, "Risk_Exposure")}
+Root Cause Driver:
+{root_cause}
+{root_cause}
+{root_cause}
 
 Business Division:
 {field_text(row, "Business_Division")}
@@ -127,15 +148,6 @@ Taxonomy:
 {taxonomy}
 {taxonomy}
 {taxonomy}
-
-Risk Metric:
-{field_text(row, "Risk_Metric")}
-{field_text(row, "Risk_Metric")}
-{field_text(row, "Risk_Metric")}
-
-Assessment Method:
-{field_text(row, "Assessment_Method")}
-{field_text(row, "Assessment_Method")}
 """
 
 
@@ -143,6 +155,18 @@ def tokenize(text: str) -> list[str]:
     """Tokenize text for the local embedding fallback."""
     tokens = re.findall(r"[a-z0-9][a-z0-9/-]{1,}", str(text).lower())
     return [token for token in tokens if token not in STOP_WORDS and not token.isdigit()]
+
+
+def semantic_keywords(text: str, limit: int = 6) -> str:
+    """Return stable non-numeric keywords for root-cause/description signatures."""
+    tokens = [
+        token
+        for token in tokenize(text)
+        if len(token) > 2 and not re.search(r"\d", token)
+    ]
+    if not tokens:
+        return ""
+    return " ".join(token for token, _ in Counter(tokens).most_common(limit))
 
 
 def token_bucket(token: str, dimensions: int) -> int:
@@ -365,18 +389,22 @@ def normalize_signature(value: str) -> str:
 
 
 def cluster_theme_signature(data: pd.DataFrame, cluster: list[str]) -> str:
-    """Build the driver/metric signature used to merge duplicate themes."""
+    """Build the taxonomy/root-cause signature used to merge duplicate themes."""
     theme_data = data[data["Group_ID"].astype(str).isin(cluster)]
-    driver = dominant_value(theme_data["Taxonomy_L2"])
-    metric = dominant_value(theme_data["Risk_Metric"])
-    if driver:
-        return normalize_signature(f"{driver}|{metric}")
+    taxonomy_l1 = dominant_value(theme_data["Taxonomy_L1"])
+    taxonomy_l2 = dominant_value(theme_data["Taxonomy_L2"])
+    root_cause_text = " ".join(theme_data.apply(root_cause_driver, axis=1).tolist())
+    description_text = " ".join(theme_data["Risk_Description"].dropna().astype(str).tolist())
+    root_keywords = semantic_keywords(root_cause_text, limit=5)
+    description_keywords = semantic_keywords(description_text, limit=5)
+    if taxonomy_l1 or taxonomy_l2:
+        return normalize_signature(f"{taxonomy_l1}|{taxonomy_l2}|{root_keywords or description_keywords}")
 
     fallback = "|".join(
         [
-            dominant_value(theme_data["Taxonomy_L1"]),
-            metric,
-            dominant_value(theme_data["Assessment_Method"]),
+            root_keywords,
+            description_keywords,
+            dominant_value(theme_data["Business_Division"]),
         ]
     )
     return normalize_signature(fallback) or "|".join(cluster)
@@ -417,6 +445,14 @@ def dominant_value(series: pd.Series) -> str:
     if clean.empty:
         return ""
     return str(clean.value_counts().idxmax())
+
+
+def title_fragment(value: str, max_words: int = 4) -> str:
+    """Create a compact title-cased fragment from root-cause keywords."""
+    keywords = semantic_keywords(value, limit=max_words)
+    if not keywords:
+        return ""
+    return " ".join(word.upper() if word in ACRONYMS else word.capitalize() for word in keywords.split())
 
 
 def theme_gap_text(theme_data: pd.DataFrame) -> str:
@@ -464,23 +500,31 @@ def build_theme_records(
     for index, cluster in enumerate(clusters, start=1):
         theme_data = data[data["Group_ID"].astype(str).isin(cluster)].copy()
         dominant_l2 = dominant_value(theme_data["Taxonomy_L2"])
+        dominant_root_cause = dominant_value(theme_data.apply(root_cause_driver, axis=1))
         dominant_metric = dominant_value(theme_data["Risk_Metric"])
         dominant_method = dominant_value(theme_data["Assessment_Method"])
         dominant_division = dominant_value(theme_data["Business_Division"])
         dominant_l1 = dominant_value(theme_data["Taxonomy_L1"])
-        label_source = dominant_l2 or dominant_metric or dominant_l1
+        label_source = dominant_l2 or dominant_l1 or dominant_root_cause
         theme_name = format_theme_label(label_source)
+        root_fragment = title_fragment(dominant_root_cause)
+        if root_fragment and root_fragment.lower() not in theme_name.lower():
+            theme_name = f"{theme_name} - {root_fragment}"
         taxonomies = sorted(
             {
                 value
-                for value in theme_data[["Taxonomy_L0", "Taxonomy_L1"]].astype(str).stack().tolist()
+                for value in theme_data[["Taxonomy_L0", "Taxonomy_L1", "Taxonomy_L2"]]
+                .astype(str)
+                .stack()
+                .tolist()
                 if value and value.lower() != "nan"
             }
         )
         divisions = sorted(theme_data["Business_Division"].dropna().astype(str).unique().tolist())
         metrics = unique_join(theme_data["Risk_Metric"], limit=4)
         methods = unique_join(theme_data["Assessment_Method"], limit=3)
-        drivers = unique_join(theme_data["Taxonomy_L2"], limit=3)
+        root_causes = unique_join(theme_data.apply(root_cause_driver, axis=1), limit=3)
+        taxonomy_l2_values = unique_join(theme_data["Taxonomy_L2"], limit=3)
         avg_similarity = average_internal_similarity(cluster, relationships)
         cross_business = len(divisions) > 1
         emerging = bool(cross_business and len(cluster) >= 2 and theme_data["Taxonomy_L1"].nunique() > 1)
@@ -489,14 +533,17 @@ def build_theme_records(
             {
                 "Theme_ID": f"THM_{index:03d}",
                 "Theme_Name": theme_name,
-                "Primary_Driver": dominant_l2,
+                "Primary_Driver": dominant_root_cause,
+                "Primary_Taxonomy_L1": dominant_l1,
+                "Primary_Taxonomy_L2": dominant_l2,
                 "Primary_Metric": dominant_metric,
                 "Primary_Method": dominant_method,
                 "Primary_Division": dominant_division,
                 "Theme_Summary": (
-                    f"Risks related to {drivers}. Business divisions include "
-                    f"{', '.join(divisions) if divisions else 'none'}. Metrics include {metrics}; "
-                    f"assessment methods include {methods}."
+                    f"Risks related to {taxonomy_l2_values} with root-cause drivers including "
+                    f"{root_causes}. Business divisions include "
+                    f"{', '.join(divisions) if divisions else 'none'}. Supporting metrics include "
+                    f"{metrics}; assessment methods include {methods}."
                 ),
                 "Taxonomy_Alignment": taxonomies,
                 "Business_Divisions": divisions,
@@ -523,15 +570,20 @@ def build_theme_records(
 
 def differentiator_for_theme(row: pd.Series) -> str:
     """Choose a concise suffix when otherwise similar theme names remain."""
-    metric = str(row.get("Primary_Metric") or "").strip()
+    root_cause = title_fragment(str(row.get("Primary_Driver") or ""))
+    taxonomy_l2 = str(row.get("Primary_Taxonomy_L2") or "").strip()
+    taxonomy_l1 = str(row.get("Primary_Taxonomy_L1") or "").strip()
     division = str(row.get("Primary_Division") or "").strip()
-    method = str(row.get("Primary_Method") or "").strip()
 
-    if metric:
-        return metric
+    if root_cause:
+        return root_cause
+    if taxonomy_l2:
+        return taxonomy_l2
+    if taxonomy_l1:
+        return taxonomy_l1
     if division:
         return division
-    return method
+    return ""
 
 
 def uniquify_theme_names(themes: pd.DataFrame) -> pd.DataFrame:
