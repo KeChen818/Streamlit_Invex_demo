@@ -81,10 +81,10 @@ ACRONYMS = {
 }
 
 ROOT_CAUSE_COLUMNS = [
-    "Root_Cause_Driver",
-    "Root_Cause",
-    "Risk_Driver",
-    "Cause_Driver",
+    "Root_Cause_L0",
+    "Root_Cause_L1",
+    "Root_Cause_Comment",
+    "Early_Warning_Sign(EWS)",
     "Risk_Exposure",
 ]
 
