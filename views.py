@@ -287,10 +287,34 @@ def render_theme_detail_cards(data: pd.DataFrame, themes: pd.DataFrame) -> None:
             cols[1].metric("Divisions", f"{len(theme['Business_Divisions'])}")
             cols[2].metric("Taxonomy L1", f"{theme_risks['Taxonomy_L1'].nunique()}")
             cols[3].metric("Metrics", f"{theme_risks['Risk_Metric'].nunique()}")
-            if theme.get("Common_Topic"):
-                st.markdown(f"**Common topic:** {escape(str(theme['Common_Topic']))}", unsafe_allow_html=True)
-            st.markdown(f"**Potential gap:** {escape(theme['Potential_Gap'])}", unsafe_allow_html=True)
             render_risk_table(theme_risks)
+
+
+def render_count_ring_chart(summary: pd.DataFrame, dimension: str, title: str) -> None:
+    """Render a compact ring chart for selected-scope counts."""
+    chart_data = summary[summary["Dimension"] == dimension].copy()
+    if chart_data.empty:
+        st.info(f"No {dimension} data is available for the current filter.")
+        return
+
+    chart = (
+        alt.Chart(chart_data)
+        .mark_arc(innerRadius=54, outerRadius=88, stroke="#fff", strokeWidth=2)
+        .encode(
+            theta=alt.Theta("Risk_Count:Q", title="Risk count"),
+            color=alt.Color(
+                "Value:N",
+                title=dimension,
+                scale=alt.Scale(range=["#d64545", "#1a1814", "#8f6b4a", "#5c5650", "#c09b70", "#7d746b"]),
+            ),
+            tooltip=[
+                alt.Tooltip("Value:N", title=dimension),
+                alt.Tooltip("Risk_Count:Q", title="Risks"),
+            ],
+        )
+        .properties(height=230, title=title)
+    )
+    st.altair_chart(chart, width="stretch")
 
 
 def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bool = True) -> None:
@@ -323,7 +347,7 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
             step=0.01,
         )
 
-    themes, relationships, quarter_summary = build_theme_classification(
+    themes, relationships, dimension_summary = build_theme_classification(
         data,
         top_k=top_k,
         relationship_threshold=relationship_threshold,
@@ -333,8 +357,8 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Suggested Themes", f"{len(themes):,}")
     col2.metric("Similar Relationships", f"{len(relationships):,}")
-    col3.metric("Cross-Business Themes", f"{int(themes['Cross_Business'].sum()):,}")
-    col4.metric("Emerging Clusters", f"{int(themes['Emerging_Indicator'].sum()):,}")
+    col3.metric("Material Risks", f"{int(data['Is_Material'].sum()):,}")
+    col4.metric("Non-Material Risks", f"{int(len(data) - data['Is_Material'].sum()):,}")
 
     with st.spinner("Generating theme analysis..."):
         analysis_text = get_theme_ai_analysis(data, themes, relationships, model)
@@ -343,53 +367,70 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
     chart_left, chart_right = st.columns([0.52, 0.48])
     with chart_left:
         chart_data = themes.sort_values("Risk_Count", ascending=False).head(12).copy()
-        chart = (
-            alt.Chart(chart_data)
+        materiality_data = chart_data.melt(
+            id_vars=["Theme_ID", "Theme_Name", "Risk_Count", "Average_Similarity"],
+            value_vars=["Material_Risks", "Non_Material_Risks"],
+            var_name="Materiality",
+            value_name="Materiality_Count",
+        )
+        materiality_data["Materiality"] = materiality_data["Materiality"].replace(
+            {
+                "Material_Risks": "Material",
+                "Non_Material_Risks": "Non-Material",
+            }
+        )
+        materiality_label_data = materiality_data[materiality_data["Materiality_Count"] > 0].copy()
+        bars = (
+            alt.Chart(materiality_data)
             .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3)
             .encode(
-                x=alt.X("Risk_Count:Q", title="Risk count", axis=alt.Axis(tickMinStep=1)),
+                x=alt.X(
+                    "Materiality_Count:Q",
+                    title="Risk count",
+                    axis=alt.Axis(tickMinStep=1),
+                    stack="zero",
+                ),
                 y=alt.Y("Theme_Name:N", title=None, sort="-x"),
                 color=alt.Color(
-                    "Cross_Business:N",
-                    title="Cross business",
-                    scale=alt.Scale(range=["#7d746b", "#d64545"]),
+                    "Materiality:N",
+                    title="Materiality",
+                    scale=alt.Scale(domain=["Material", "Non-Material"], range=["#d64545", "#7d746b"]),
                 ),
                 tooltip=[
                     alt.Tooltip("Theme_ID:N", title="Theme ID"),
                     alt.Tooltip("Theme_Name:N", title="Theme"),
                     alt.Tooltip("Risk_Count:Q", title="Risks"),
+                    alt.Tooltip("Materiality:N", title="Materiality"),
+                    alt.Tooltip("Materiality_Count:Q", title="Materiality count"),
                     alt.Tooltip("Average_Similarity:Q", title="Avg similarity", format=".3f"),
                 ],
             )
-            .properties(height=max(280, 30 * len(chart_data)), title="Suggested Risk Themes")
+        )
+        labels = (
+            alt.Chart(materiality_label_data)
+            .mark_text(align="center", baseline="middle", color="#fff", fontSize=11, fontWeight="bold")
+            .encode(
+                x=alt.X("Materiality_Count:Q", stack="center"),
+                y=alt.Y("Theme_Name:N", title=None, sort="-x"),
+                detail="Materiality:N",
+                text=alt.Text("Materiality_Count:Q", format="d"),
+            )
+        )
+        chart = (bars + labels).properties(
+            height=max(190, 20 * len(chart_data)),
+            title="Suggested Risk Themes by Overall_Materiality Count",
         )
         st.altair_chart(chart, width="stretch")
 
     with chart_right:
-        if quarter_summary.empty:
-            st.info("No quarter data is available for the current filter.")
+        if dimension_summary.empty:
+            st.info("No Business Division or GCRS data is available for the current filter.")
         else:
-            qoq_chart = (
-                alt.Chart(quarter_summary)
-                .mark_bar(cornerRadiusTopRight=3, cornerRadiusTopLeft=3)
-                .encode(
-                    x=alt.X("Reporting_Quarter:N", title="Reporting quarter"),
-                    y=alt.Y("Risk_Count:Q", title="Risk count", axis=alt.Axis(tickMinStep=1)),
-                    color=alt.Color(
-                        "Theme_Name:N",
-                        title="Theme",
-                        scale=alt.Scale(range=["#d64545", "#1a1814", "#8f6b4a", "#5c5650", "#c09b70"]),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("Theme_ID:N", title="Theme ID"),
-                        alt.Tooltip("Theme_Name:N", title="Theme"),
-                        alt.Tooltip("Reporting_Quarter:N", title="Quarter"),
-                        alt.Tooltip("Risk_Count:Q", title="Risks"),
-                    ],
-                )
-                .properties(height=280, title="QoQ Theme Count")
-            )
-            st.altair_chart(qoq_chart, width="stretch")
+            ring_left, ring_right = st.columns(2)
+            with ring_left:
+                render_count_ring_chart(dimension_summary, "Business Division", "Business Division Count")
+            with ring_right:
+                render_count_ring_chart(dimension_summary, "GCRS", "GCRS Count")
 
     st.subheader("Human Review Workflow")
     render_theme_review_editor(themes)

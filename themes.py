@@ -619,6 +619,13 @@ def theme_gap_text(theme_data: pd.DataFrame) -> str:
     return "; ".join(signals) if signals else "No metric or method gap flagged."
 
 
+def materiality_counts(theme_data: pd.DataFrame) -> tuple[int, int]:
+    """Count material/non-material risks using the source Overall_Materiality flag."""
+    material_count = int(theme_data["Is_Material"].sum()) if "Is_Material" in theme_data else 0
+    non_material_count = int(len(theme_data) - material_count)
+    return material_count, non_material_count
+
+
 def average_internal_similarity(cluster: list[str], relationships: pd.DataFrame) -> float:
     """Calculate average pair similarity inside a suggested theme cluster."""
     if len(cluster) < 2 or relationships.empty:
@@ -678,6 +685,8 @@ def build_theme_records(
         avg_similarity = average_internal_similarity(cluster, relationships)
         cross_business = len(divisions) > 1
         emerging = bool(cross_business and len(cluster) >= 2 and theme_data["Taxonomy_L1"].nunique() > 1)
+        material_count, non_material_count = materiality_counts(theme_data)
+        gap_text = theme_gap_text(theme_data)
 
         theme_records.append(
             {
@@ -691,15 +700,18 @@ def build_theme_records(
                 "Primary_Division": dominant_division,
                 "Common_Topic": shared_topic,
                 "Theme_Summary": (
-                    f"Risks related to {taxonomy_l2_values}. Common title/description topic: "
-                    f"{shared_topic or 'not enough repeated wording'}. Root-cause levels include "
-                    f"{root_causes}. Evidence includes {root_evidence}. Business divisions include "
-                    f"{', '.join(divisions) if divisions else 'none'}. Supporting metrics include "
-                    f"{metrics}; assessment methods include {methods}."
+                    f"- **Scope:** {len(theme_data)} risks related to {taxonomy_l2_values}.\n"
+                    f"- **Common topic:** {shared_topic or 'No repeated title/description topic strong enough to use as a split key.'}\n"
+                    f"- **Root-cause pattern:** {root_causes}. Supporting evidence: {root_evidence or 'not provided'}.\n"
+                    f"- **Coverage:** Business divisions include {', '.join(divisions) if divisions else 'none'}; "
+                    f"Overall_Materiality count is {material_count} material / {non_material_count} non-material.\n"
+                    f"- **Measurement:** Metrics include {metrics}; assessment methods include {methods}. {gap_text}"
                 ),
                 "Taxonomy_Alignment": taxonomies,
                 "Business_Divisions": divisions,
                 "Risk_Count": int(len(theme_data)),
+                "Material_Risks": material_count,
+                "Non_Material_Risks": non_material_count,
                 "Risk_IDs": cluster,
                 "Embedding_Centroid_ID": f"vec_{index:03d}",
                 "LLM_Generated": False,
@@ -712,7 +724,7 @@ def build_theme_records(
                 "Emerging_Indicator": emerging,
                 "Cross_Business": cross_business,
                 "Average_Similarity": avg_similarity,
-                "Potential_Gap": theme_gap_text(theme_data),
+                "Potential_Gap": gap_text,
             }
         )
 
@@ -759,27 +771,24 @@ def uniquify_theme_names(themes: pd.DataFrame) -> pd.DataFrame:
     return themes
 
 
-def build_quarter_theme_summary(data: pd.DataFrame, themes: pd.DataFrame) -> pd.DataFrame:
-    """Create a quarter-by-theme count table for QoQ comparison."""
-    if themes.empty:
+def build_dimension_count_summary(data: pd.DataFrame) -> pd.DataFrame:
+    """Create Business Division and GCRS count tables for ring charts."""
+    if data.empty:
         return pd.DataFrame()
 
     rows = []
-    for theme in themes.to_dict("records"):
-        risk_ids = set(theme["Risk_IDs"])
-        theme_data = data[data["Group_ID"].astype(str).isin(risk_ids)]
-        counts = theme_data["Reporting_Quarter"].fillna("Unknown").astype(str).value_counts()
-        for quarter, count in counts.items():
+    for dimension, column in [("Business Division", "Business_Division"), ("GCRS", "GCRS")]:
+        values = data[column].fillna("").astype(str).str.strip().replace("", "Unspecified")
+        for value, count in values.value_counts().items():
             rows.append(
                 {
-                    "Theme_ID": theme["Theme_ID"],
-                    "Theme_Name": theme["Theme_Name"],
-                    "Reporting_Quarter": quarter,
+                    "Dimension": dimension,
+                    "Value": value,
                     "Risk_Count": int(count),
                 }
             )
 
-    return pd.DataFrame(rows).sort_values(["Reporting_Quarter", "Theme_ID"])
+    return pd.DataFrame(rows).sort_values(["Dimension", "Risk_Count"], ascending=[True, False])
 
 
 def build_theme_classification(
@@ -801,8 +810,8 @@ def build_theme_classification(
         clusters = cluster_risks(risk_ids, relationships, cluster_threshold)
     clusters = merge_duplicate_theme_clusters(scoped, clusters)
     themes = build_theme_records(scoped, clusters, relationships)
-    quarter_summary = build_quarter_theme_summary(scoped, themes)
-    return themes, relationships, quarter_summary
+    dimension_summary = build_dimension_count_summary(scoped)
+    return themes, relationships, dimension_summary
 
 
 def build_theme_fallback_analysis(themes: pd.DataFrame, relationships: pd.DataFrame) -> str:

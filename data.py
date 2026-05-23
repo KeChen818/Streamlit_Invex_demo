@@ -67,6 +67,7 @@ def normalize_data(records: list[dict[str, Any]]) -> pd.DataFrame:
     df["Likelihood_Score"] = (
         df["Likelihood_Rating"].str.extract(r"^\s*(\d+)")[0].astype(float).fillna(0)
     )
+    # Materiality is a direct inventory flag from Overall_Materiality, not an AI-derived classification.
     df["Is_Material"] = df["Overall_Materiality"].str.lower().eq("material")
     return df
 
