@@ -139,10 +139,17 @@ def get_theme_ai_analysis(
             "Taxonomy_Alignment",
             "Business_Divisions",
             "Risk_Count",
+            "Material_Risks",
+            "Non_Material_Risks",
             "Risk_IDs",
+            "Common_Topic",
+            "Key_Drivers",
             "Emerging_Indicator",
             "Cross_Business",
             "Average_Similarity",
+            "Confidence_Score",
+            "Review_Required",
+            "Governance_Check",
             "Potential_Gap",
         ]
     ].head(40)
@@ -151,6 +158,7 @@ def get_theme_ai_analysis(
         "You are a risk theme classification analyst. Use only the supplied records and computed facts. "
         "Existing Taxonomy_L1, Taxonomy_L2, and regulatory classifications are authoritative and must not be overwritten. "
         "Only discuss suggested risk themes, similar risk relationships, emerging clusters, and cross-business linkages. "
+        "Explain grouping through risk driver, transmission channel, exposure, and management action where the data supports it. "
         "Do not analyze, aggregate, or compare Impact_Numbers. Write concise Markdown."
     )
     user_prompt = f"""
