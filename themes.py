@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from collections import Counter
 from typing import Iterable
@@ -18,8 +19,36 @@ import pandas as pd
 
 from .utils import unique_join
 
+try:
+    from langchain_core.documents import Document
+except Exception:
+    try:
+        from langchain.schema import Document
+    except Exception:
+        Document = None
+
+try:
+    from langchain_community.vectorstores import FAISS
+except Exception:
+    FAISS = None
+
+try:
+    from langchain_openai import OpenAIEmbeddings
+except Exception:
+    OpenAIEmbeddings = None
+
 
 THEME_REVIEW_ACTIONS = ["Pending Review", "Accept", "Rename", "Merge", "Split", "Reject"]
+
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large"
+MIN_THEME_CONFIDENCE = 0.50
+HYBRID_WEIGHTS = {
+    "semantic": 0.50,
+    "metric_impact": 0.25,
+    "taxonomy": 0.15,
+    "driver": 0.10,
+}
+_OPENAI_FAISS_EMBEDDING_CACHE: dict[str, np.ndarray] = {}
 
 SIMILARITY_BANDS = [
     (0.90, "Near duplicate"),
@@ -146,47 +175,76 @@ def clean_risk_title(row: pd.Series) -> str:
     return re.sub(r"\b\d+\b", "", clean_title).strip()
 
 
-def build_semantic_payload(row: pd.Series) -> str:
-    """Build a weighted semantic payload used for theme similarity.
+def risk_identifier(row: pd.Series) -> str:
+    """Return the source risk identifier used in vector metadata."""
+    return field_text(row, "Group_ID")
 
-    Titles are deliberately down-weighted because executive themes should be
-    driven by risk description, taxonomy, and root-cause driver patterns.
-    """
-    clean_title = clean_risk_title(row)
+
+def build_standard_risk_text(row: pd.Series) -> str:
+    """Create a clean full-risk text block for traceability and summaries."""
     taxonomy = f'{field_text(row, "Taxonomy_L1")} / {field_text(row, "Taxonomy_L2")}'
-    description = field_text(row, "Risk_Description")
-    root_cause = root_cause_driver(row)
-    high_weight_sections = [
-        field_text(row, "Taxonomy_L1"),
-        field_text(row, "Taxonomy_L2"),
-        root_cause,
-        description,
-    ]
     return f"""
-Theme Signals:
-{" ".join(high_weight_sections)}
-{" ".join(high_weight_sections)}
+Risk ID: {risk_identifier(row)}
 
-Risk Name:
-{clean_title}
+Primary Risk Name:
+{clean_risk_title(row)}
 
-Risk Description:
-{description}
-{description}
-{description}
+Primary Risk Description:
+{field_text(row, "Risk_Description")}
 
-Root Cause Driver:
-{root_cause}
-{root_cause}
-{root_cause}
+Risk Metric:
+{field_text(row, "Risk_Metric")}
+
+Impact Commentary:
+{field_text(row, "Impact_Comment")}
+
+Taxonomy:
+{taxonomy}
+
+Risk Driver:
+{root_cause_driver(row)}
 
 Business Division:
 {field_text(row, "Business_Division")}
 
-Taxonomy:
+GCRS:
+{field_text(row, "GCRS")}
+
+Assessment Method:
+{field_text(row, "Assessment_Method")}
+"""
+
+
+def build_semantic_payload(row: pd.Series) -> str:
+    """Build a weighted semantic payload used for theme similarity.
+
+    Risk title and description are deliberately highest-weight because theme
+    grouping should start with the risk scenario, not only official taxonomy.
+    """
+    clean_title = clean_risk_title(row)
+    taxonomy = f'{field_text(row, "Taxonomy_L1")} / {field_text(row, "Taxonomy_L2")}'
+    description = field_text(row, "Risk_Description")
+    metric_impact = f'{field_text(row, "Risk_Metric")} {field_text(row, "Impact_Comment")}'
+    root_cause = root_cause_driver(row)
+    return f"""
+Primary Risk Title:
+{clean_title}
+{clean_title}
+
+Primary Risk Description:
+{description}
+{description}
+{description}
+
+Risk Metric and Impact Commentary:
+{metric_impact}
+{metric_impact}
+
+Taxonomy Context:
 {taxonomy}
-{taxonomy}
-{taxonomy}
+
+Root Cause Driver:
+{root_cause}
 """
 
 
@@ -337,6 +395,79 @@ def build_local_embeddings(payloads: list[str], dimensions: int = 512) -> np.nda
     return vectors
 
 
+def normalize_embedding_matrix(matrix: np.ndarray) -> np.ndarray:
+    """Normalize embedding rows so dot product is cosine similarity."""
+    if matrix.size == 0:
+        return matrix
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
+
+def build_langchain_documents(data: pd.DataFrame, payloads: list[str]) -> list[object]:
+    """Build weighted LangChain documents with risk metadata for FAISS indexing."""
+    if Document is None:
+        return []
+
+    docs = []
+    for position, (_, row) in enumerate(data.iterrows()):
+        docs.append(
+            Document(
+                page_content=payloads[position],
+                metadata={
+                    "risk_id": risk_identifier(row),
+                    "risk_title": clean_risk_title(row),
+                    "taxonomy_l1": field_text(row, "Taxonomy_L1"),
+                    "taxonomy_l2": field_text(row, "Taxonomy_L2"),
+                    "business": field_text(row, "Business_Division"),
+                    "gcrs": field_text(row, "GCRS"),
+                },
+            )
+        )
+    return docs
+
+
+def build_openai_faiss_embeddings(data: pd.DataFrame, payloads: list[str]) -> np.ndarray | None:
+    """Embed weighted risk payloads with OpenAI and load them into FAISS when available."""
+    if not os.getenv("OPENAI_API_KEY") or OpenAIEmbeddings is None or FAISS is None or Document is None:
+        return None
+
+    documents = build_langchain_documents(data, payloads)
+    if not documents:
+        return None
+
+    try:
+        model_name = os.getenv("OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL
+        cache_payload = model_name + "\n" + "\n---risk-doc---\n".join(doc.page_content for doc in documents)
+        cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+        if cache_key in _OPENAI_FAISS_EMBEDDING_CACHE:
+            return _OPENAI_FAISS_EMBEDDING_CACHE[cache_key].copy()
+
+        embedding_model = OpenAIEmbeddings(
+            model=model_name
+        )
+        vector_store = FAISS.from_documents(documents, embedding_model)
+        vectors = [
+            vector_store.index.reconstruct(index)
+            for index in range(vector_store.index.ntotal)
+        ]
+        if len(vectors) != len(documents):
+            return None
+        embedding_matrix = normalize_embedding_matrix(np.asarray(vectors, dtype=float))
+        _OPENAI_FAISS_EMBEDDING_CACHE[cache_key] = embedding_matrix.copy()
+        return embedding_matrix
+    except Exception:
+        return None
+
+
+def build_embedding_layer(data: pd.DataFrame, payloads: list[str]) -> np.ndarray:
+    """Use OpenAI/FAISS embeddings when configured, otherwise use local embeddings."""
+    openai_embeddings = build_openai_faiss_embeddings(data, payloads)
+    if openai_embeddings is not None:
+        return openai_embeddings
+    return build_local_embeddings(payloads)
+
+
 def calibrated_similarity(cosine_similarity: float) -> float:
     """Map local cosine similarity into the business threshold scale."""
     positive_similarity = max(float(cosine_similarity), 0.0)
@@ -351,29 +482,133 @@ def relation_for_score(score: float) -> str:
     return "Weak relationship"
 
 
-def build_similarity_relationships(
+def token_similarity(left: str, right: str) -> float:
+    """Return a simple Jaccard score for two semantic text fields."""
+    left_tokens = set(tokenize(left))
+    right_tokens = set(tokenize(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def taxonomy_alignment_score(source: pd.Series, target: pd.Series) -> float:
+    """Score whether two risks align to the same official taxonomy levels."""
+    source_l2 = field_text(source, "Taxonomy_L2")
+    target_l2 = field_text(target, "Taxonomy_L2")
+    if source_l2 and source_l2 == target_l2:
+        return 1.0
+
+    source_l1 = field_text(source, "Taxonomy_L1")
+    target_l1 = field_text(target, "Taxonomy_L1")
+    if source_l1 and source_l1 == target_l1:
+        return 0.75
+
+    source_l0 = field_text(source, "Taxonomy_L0")
+    target_l0 = field_text(target, "Taxonomy_L0")
+    if source_l0 and source_l0 == target_l0:
+        return 0.45
+    return 0.0
+
+
+def driver_similarity_score(source: pd.Series, target: pd.Series) -> float:
+    """Score common risk driver/root-cause patterns beyond similar wording."""
+    source_driver_level = root_cause_level(source)
+    target_driver_level = root_cause_level(target)
+    if source_driver_level and source_driver_level == target_driver_level:
+        return 1.0
+    return token_similarity(root_cause_driver(source), root_cause_driver(target))
+
+
+def metric_impact_similarity_score(source: pd.Series, target: pd.Series) -> float:
+    """Score common risk metric and impact-comment assumption text."""
+    source_metric = field_text(source, "Risk_Metric")
+    target_metric = field_text(target, "Risk_Metric")
+    if source_metric and target_metric and source_metric == target_metric:
+        metric_score = 1.0
+    else:
+        metric_score = token_similarity(source_metric, target_metric)
+
+    impact_score = token_similarity(
+        field_text(source, "Impact_Comment"),
+        field_text(target, "Impact_Comment"),
+    )
+    if source_metric or target_metric:
+        return round((0.60 * metric_score) + (0.40 * impact_score), 3)
+    return round(impact_score, 3)
+
+
+def hybrid_similarity_components(
+    source: pd.Series,
+    target: pd.Series,
+    semantic_similarity: float,
+) -> dict[str, float]:
+    """Blend title/description, metric/impact, taxonomy, and driver signals."""
+    metric_impact_score = metric_impact_similarity_score(source, target)
+    taxonomy_score = taxonomy_alignment_score(source, target)
+    driver_score = driver_similarity_score(source, target)
+    hybrid_score = (
+        HYBRID_WEIGHTS["semantic"] * semantic_similarity
+        + HYBRID_WEIGHTS["metric_impact"] * metric_impact_score
+        + HYBRID_WEIGHTS["taxonomy"] * taxonomy_score
+        + HYBRID_WEIGHTS["driver"] * driver_score
+    )
+    return {
+        "Similarity_Score": round(float(hybrid_score), 3),
+        "Semantic_Similarity": round(float(semantic_similarity), 3),
+        "Metric_Impact_Similarity": round(float(metric_impact_score), 3),
+        "Taxonomy_Alignment_Score": round(float(taxonomy_score), 3),
+        "Driver_Similarity": round(float(driver_score), 3),
+    }
+
+
+def build_hybrid_similarity_matrix(
     data: pd.DataFrame,
     embeddings: np.ndarray,
+) -> tuple[np.ndarray, dict[tuple[int, int], dict[str, float]]]:
+    """Create the hybrid score matrix used for relationship search and clustering."""
+    records = data.reset_index(drop=True)
+    cosine_matrix = embeddings @ embeddings.T
+    score_matrix = np.eye(len(records), dtype=float)
+    component_lookup: dict[tuple[int, int], dict[str, float]] = {}
+
+    for source_index, source in records.iterrows():
+        for target_index in range(source_index + 1, len(records)):
+            target = records.iloc[target_index]
+            semantic_score = calibrated_similarity(cosine_matrix[source_index, target_index])
+            components = hybrid_similarity_components(source, target, semantic_score)
+            score = components["Similarity_Score"]
+            score_matrix[source_index, target_index] = score
+            score_matrix[target_index, source_index] = score
+            component_lookup[(source_index, target_index)] = components
+            component_lookup[(target_index, source_index)] = components
+
+    return score_matrix, component_lookup
+
+
+def build_similarity_relationships(
+    data: pd.DataFrame,
+    similarity_matrix: np.ndarray,
     top_k: int,
     relationship_threshold: float,
+    component_lookup: dict[tuple[int, int], dict[str, float]] | None = None,
 ) -> pd.DataFrame:
-    """Find top similar risks and return de-duplicated relationship records."""
+    """Find top hybrid-similar risks and return de-duplicated relationship records."""
     if data.empty or len(data) == 1:
         return pd.DataFrame()
 
     records = data.reset_index(drop=True)
-    cosine_matrix = embeddings @ embeddings.T
     relationships: dict[tuple[str, str], dict[str, object]] = {}
+    component_lookup = component_lookup or {}
 
     for source_index, source in records.iterrows():
         source_id = field_text(source, "Group_ID")
-        candidate_indices = np.argsort(cosine_matrix[source_index])[::-1]
+        candidate_indices = np.argsort(similarity_matrix[source_index])[::-1]
         matches = [idx for idx in candidate_indices if idx != source_index][:top_k]
 
         for target_index in matches:
             target = records.iloc[int(target_index)]
             target_id = field_text(target, "Group_ID")
-            score = calibrated_similarity(cosine_matrix[source_index, target_index])
+            score = round(float(similarity_matrix[source_index, target_index]), 3)
             if score < relationship_threshold:
                 continue
 
@@ -382,18 +617,23 @@ def build_similarity_relationships(
             if existing and float(existing["Similarity_Score"]) >= score:
                 continue
 
-            relationships[pair_key] = {
+            components = component_lookup.get((source_index, int(target_index)), {})
+            relationship_record = {
                 "Risk_ID": source_id,
                 "Risk_Title": field_text(source, "Risk_Title"),
                 "Similar_Risk_ID": target_id,
                 "Similar_Risk_Title": field_text(target, "Risk_Title"),
                 "Similarity_Score": score,
+                "Confidence_Score": score,
                 "Relationship": relation_for_score(score),
                 "Same_Taxonomy_L1": field_text(source, "Taxonomy_L1") == field_text(target, "Taxonomy_L1"),
+                "Mixed_Category_Warning": field_text(source, "Taxonomy_L1") != field_text(target, "Taxonomy_L1"),
                 "Same_Metric": field_text(source, "Risk_Metric") == field_text(target, "Risk_Metric"),
                 "Same_Method": field_text(source, "Assessment_Method")
                 == field_text(target, "Assessment_Method"),
             }
+            relationship_record.update(components)
+            relationships[pair_key] = relationship_record
 
     if not relationships:
         return pd.DataFrame()
@@ -522,6 +762,81 @@ def cluster_risks_to_target(
     return sorted(clusters, key=lambda values: (-len(values), values[0]))
 
 
+def initialize_medoids(similarity_matrix: np.ndarray, cluster_count: int) -> list[int]:
+    """Choose deterministic farthest-first medoids from a similarity matrix."""
+    selected = [0]
+    similarity_to_selected = similarity_matrix[:, 0].copy()
+
+    while len(selected) < cluster_count:
+        candidate_scores = similarity_to_selected.copy()
+        candidate_scores[selected] = np.inf
+        next_index = int(np.argmin(candidate_scores))
+        if next_index in selected:
+            break
+        selected.append(next_index)
+        similarity_to_selected = np.maximum(similarity_to_selected, similarity_matrix[:, next_index])
+
+    return selected
+
+
+def cluster_risks_to_target_by_similarity(
+    risk_ids: Iterable[str],
+    similarity_matrix: np.ndarray,
+    target_theme_count: int,
+    max_iterations: int = 40,
+) -> list[list[str]]:
+    """Cluster risks into a target count using hybrid similarity, not wording alone."""
+    ids = list(risk_ids)
+    if not ids:
+        return []
+
+    cluster_count = max(1, min(int(target_theme_count), len(ids)))
+    if cluster_count == len(ids):
+        return [[risk_id] for risk_id in ids]
+
+    medoids = initialize_medoids(similarity_matrix, cluster_count)
+    labels = np.full(len(ids), -1, dtype=int)
+
+    for _ in range(max_iterations):
+        medoid_similarity = similarity_matrix[:, medoids]
+        next_labels = np.argmax(medoid_similarity, axis=1)
+
+        empty_clusters = sorted(set(range(len(medoids))) - set(next_labels.tolist()))
+        if empty_clusters:
+            assigned_similarity = medoid_similarity[np.arange(len(ids)), next_labels]
+            refill_candidates = np.argsort(assigned_similarity)
+            used_candidates: set[int] = set()
+            for empty_cluster in empty_clusters:
+                for candidate in refill_candidates:
+                    candidate_index = int(candidate)
+                    if candidate_index not in used_candidates and candidate_index not in medoids:
+                        next_labels[candidate_index] = empty_cluster
+                        medoids[empty_cluster] = candidate_index
+                        used_candidates.add(candidate_index)
+                        break
+
+        next_medoids = medoids.copy()
+        for cluster_index in range(len(medoids)):
+            members = np.where(next_labels == cluster_index)[0]
+            if len(members) == 0:
+                continue
+            cluster_similarity = similarity_matrix[np.ix_(members, members)]
+            next_medoids[cluster_index] = int(members[np.argmax(cluster_similarity.mean(axis=1))])
+
+        if np.array_equal(labels, next_labels) and next_medoids == medoids:
+            break
+        labels = next_labels
+        medoids = next_medoids
+
+    clusters = []
+    for cluster_index in range(len(medoids)):
+        cluster = [ids[index] for index, label in enumerate(labels) if label == cluster_index]
+        if cluster:
+            clusters.append(sorted(cluster))
+
+    return sorted(clusters, key=lambda values: (-len(values), values[0]))
+
+
 def normalize_signature(value: str) -> str:
     """Normalize a field into a stable duplicate-theme signature."""
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
@@ -590,6 +905,13 @@ def dominant_value(series: pd.Series) -> str:
     return str(clean.value_counts().idxmax())
 
 
+def unique_values(series: pd.Series, limit: int = 6) -> list[str]:
+    """Return ordered unique non-empty values for theme evidence fields."""
+    clean = series.dropna().astype(str).str.strip()
+    clean = clean[clean.ne("")]
+    return clean.drop_duplicates().head(limit).tolist()
+
+
 def title_fragment(value: str, max_words: int = 4) -> str:
     """Create a compact title-cased fragment from root-cause keywords."""
     keywords = semantic_keywords(value, limit=max_words)
@@ -626,6 +948,30 @@ def materiality_counts(theme_data: pd.DataFrame) -> tuple[int, int]:
     return material_count, non_material_count
 
 
+def theme_key_drivers(theme_data: pd.DataFrame, shared_topic: str) -> list[str]:
+    """Identify concise driver labels for theme inventory and review."""
+    drivers = []
+    for value in theme_data.apply(root_cause_level, axis=1).dropna().astype(str).tolist():
+        clean = re.sub(r"\s+", " ", value).strip()
+        if clean and clean not in drivers:
+            drivers.append(clean)
+    if shared_topic and shared_topic not in drivers:
+        drivers.append(shared_topic)
+    return drivers[:5]
+
+
+def theme_review_flag(theme_data: pd.DataFrame, confidence_score: float) -> tuple[bool, str]:
+    """Flag mixed or low-confidence themes for human governance review."""
+    mixed_category = theme_data["Taxonomy_L1"].nunique() > 1 or theme_data["Taxonomy_L2"].nunique() > 4
+    if mixed_category and confidence_score < 0.78:
+        return True, "Review required: mixed taxonomy and lower confidence."
+    if mixed_category:
+        return True, "Review required: mixed taxonomy alignment."
+    if confidence_score < 0.72:
+        return True, "Review required: lower similarity confidence."
+    return False, "Standard review: taxonomy authority preserved."
+
+
 def average_internal_similarity(cluster: list[str], relationships: pd.DataFrame) -> float:
     """Calculate average pair similarity inside a suggested theme cluster."""
     if len(cluster) < 2 or relationships.empty:
@@ -640,13 +986,86 @@ def average_internal_similarity(cluster: list[str], relationships: pd.DataFrame)
     return round(float(internal["Similarity_Score"].mean()), 3)
 
 
+def average_internal_similarity_from_matrix(
+    cluster: list[str],
+    id_to_index: dict[str, int],
+    similarity_matrix: np.ndarray,
+) -> float:
+    """Calculate average internal similarity from the full hybrid score matrix."""
+    indices = [id_to_index[risk_id] for risk_id in cluster if risk_id in id_to_index]
+    if len(indices) < 2:
+        return 0.0
+    values = []
+    for left_position, left_index in enumerate(indices):
+        for right_index in indices[left_position + 1 :]:
+            values.append(float(similarity_matrix[left_index, right_index]))
+    return round(float(np.mean(values)), 3) if values else 0.0
+
+
+def confidence_profile(
+    cluster: list[str],
+    id_to_index: dict[str, int],
+    similarity_matrix: np.ndarray | None,
+    component_lookup: dict[tuple[int, int], dict[str, float]] | None,
+) -> tuple[float, str]:
+    """Calculate theme confidence and explain the supporting signal mix."""
+    indices = [id_to_index[risk_id] for risk_id in cluster if risk_id in id_to_index]
+    if len(indices) < 2 or similarity_matrix is None:
+        return (
+            MIN_THEME_CONFIDENCE,
+            "Confidence is neutral because this is a single-risk theme with no internal pairwise similarity test.",
+        )
+
+    pair_scores = []
+    semantic_scores = []
+    metric_impact_scores = []
+    taxonomy_scores = []
+    driver_scores = []
+    component_lookup = component_lookup or {}
+
+    for left_position, left_index in enumerate(indices):
+        for right_index in indices[left_position + 1 :]:
+            pair_scores.append(float(similarity_matrix[left_index, right_index]))
+            components = component_lookup.get((left_index, right_index), {})
+            semantic_scores.append(float(components.get("Semantic_Similarity", 0.0)))
+            metric_impact_scores.append(float(components.get("Metric_Impact_Similarity", 0.0)))
+            taxonomy_scores.append(float(components.get("Taxonomy_Alignment_Score", 0.0)))
+            driver_scores.append(float(components.get("Driver_Similarity", 0.0)))
+
+    confidence = round(float(np.mean(pair_scores)), 3) if pair_scores else MIN_THEME_CONFIDENCE
+    semantic_avg = float(np.mean(semantic_scores)) if semantic_scores else 0.0
+    metric_impact_avg = float(np.mean(metric_impact_scores)) if metric_impact_scores else 0.0
+    taxonomy_avg = float(np.mean(taxonomy_scores)) if taxonomy_scores else 0.0
+    driver_avg = float(np.mean(driver_scores)) if driver_scores else 0.0
+    strongest_signal = max(
+        [
+            ("risk title/description", semantic_avg * HYBRID_WEIGHTS["semantic"]),
+            ("risk metric/impact comment", metric_impact_avg * HYBRID_WEIGHTS["metric_impact"]),
+            ("taxonomy", taxonomy_avg * HYBRID_WEIGHTS["taxonomy"]),
+            ("driver/root cause", driver_avg * HYBRID_WEIGHTS["driver"]),
+        ],
+        key=lambda item: item[1],
+    )[0]
+    rationale = (
+        f"Confidence {confidence:.2f} is the average internal hybrid score "
+        f"(risk title/description {semantic_avg:.2f}, metric/impact comment {metric_impact_avg:.2f}, "
+        f"taxonomy {taxonomy_avg:.2f}, driver/root cause {driver_avg:.2f}); "
+        f"largest weighted contribution is {strongest_signal}. "
+        f"Themes below {MIN_THEME_CONFIDENCE:.2f} are excluded."
+    )
+    return confidence, rationale
+
+
 def build_theme_records(
     data: pd.DataFrame,
     clusters: list[list[str]],
     relationships: pd.DataFrame,
+    similarity_matrix: np.ndarray | None = None,
+    component_lookup: dict[tuple[int, int], dict[str, float]] | None = None,
 ) -> pd.DataFrame:
     """Create AI-enriched theme mapping records from clusters."""
     theme_records = []
+    id_to_index = {risk_id: index for index, risk_id in enumerate(data["Group_ID"].astype(str).tolist())}
     for index, cluster in enumerate(clusters, start=1):
         theme_data = data[data["Group_ID"].astype(str).isin(cluster)].copy()
         dominant_l2 = dominant_value(theme_data["Taxonomy_L2"])
@@ -677,16 +1096,30 @@ def build_theme_records(
             }
         )
         divisions = sorted(theme_data["Business_Division"].dropna().astype(str).unique().tolist())
+        gcrs_values = unique_values(theme_data["GCRS"], limit=6)
+        metric_values = unique_values(theme_data["Risk_Metric"], limit=6)
+        method_values = unique_values(theme_data["Assessment_Method"], limit=6)
         metrics = unique_join(theme_data["Risk_Metric"], limit=4)
         methods = unique_join(theme_data["Assessment_Method"], limit=3)
         root_causes = unique_join(theme_data.apply(root_cause_level, axis=1), limit=3)
         root_evidence = unique_join(theme_data.apply(root_cause_evidence, axis=1), limit=3)
         taxonomy_l2_values = unique_join(theme_data["Taxonomy_L2"], limit=3)
-        avg_similarity = average_internal_similarity(cluster, relationships)
+        if similarity_matrix is not None:
+            avg_similarity = average_internal_similarity_from_matrix(cluster, id_to_index, similarity_matrix)
+        else:
+            avg_similarity = average_internal_similarity(cluster, relationships)
         cross_business = len(divisions) > 1
         emerging = bool(cross_business and len(cluster) >= 2 and theme_data["Taxonomy_L1"].nunique() > 1)
         material_count, non_material_count = materiality_counts(theme_data)
         gap_text = theme_gap_text(theme_data)
+        key_drivers = theme_key_drivers(theme_data, shared_topic)
+        confidence_score, confidence_rationale = confidence_profile(
+            cluster,
+            id_to_index,
+            similarity_matrix,
+            component_lookup,
+        )
+        review_required, governance_check = theme_review_flag(theme_data, confidence_score)
 
         theme_records.append(
             {
@@ -699,16 +1132,23 @@ def build_theme_records(
                 "Primary_Method": dominant_method,
                 "Primary_Division": dominant_division,
                 "Common_Topic": shared_topic,
+                "Key_Drivers": key_drivers,
                 "Theme_Summary": (
                     f"- **Scope:** {len(theme_data)} risks related to {taxonomy_l2_values}.\n"
                     f"- **Common topic:** {shared_topic or 'No repeated title/description topic strong enough to use as a split key.'}\n"
-                    f"- **Root-cause pattern:** {root_causes}. Supporting evidence: {root_evidence or 'not provided'}.\n"
+                    f"- **Key drivers:** {', '.join(key_drivers) if key_drivers else root_causes}. "
+                    f"Supporting evidence: {root_evidence or 'not provided'}.\n"
                     f"- **Coverage:** Business divisions include {', '.join(divisions) if divisions else 'none'}; "
                     f"Overall_Materiality count is {material_count} material / {non_material_count} non-material.\n"
-                    f"- **Measurement:** Metrics include {metrics}; assessment methods include {methods}. {gap_text}"
+                    f"- **Confidence:** {confidence_rationale}\n"
+                    f"- **Measurement and governance:** Metrics include {metrics}; assessment methods include {methods}. "
+                    f"{gap_text} {governance_check}"
                 ),
                 "Taxonomy_Alignment": taxonomies,
                 "Business_Divisions": divisions,
+                "GCRS_Values": gcrs_values,
+                "Risk_Metrics": metric_values,
+                "Assessment_Methods": method_values,
                 "Risk_Count": int(len(theme_data)),
                 "Material_Risks": material_count,
                 "Non_Material_Risks": non_material_count,
@@ -724,11 +1164,29 @@ def build_theme_records(
                 "Emerging_Indicator": emerging,
                 "Cross_Business": cross_business,
                 "Average_Similarity": avg_similarity,
+                "Confidence_Score": confidence_score,
+                "Confidence_Rationale": confidence_rationale,
+                "Review_Required": review_required,
+                "Governance_Check": governance_check,
                 "Potential_Gap": gap_text,
             }
         )
 
     themes = pd.DataFrame(theme_records)
+    if themes.empty:
+        return themes
+
+    themes = themes[
+        (themes["Confidence_Score"] >= MIN_THEME_CONFIDENCE)
+        & (themes["Risk_Count"] > 1)
+        & (themes["Average_Similarity"] > 0)
+    ].copy()
+    if themes.empty:
+        return themes
+
+    themes = themes.reset_index(drop=True)
+    themes["Theme_ID"] = [f"THM_{index:03d}" for index in range(1, len(themes) + 1)]
+    themes["Embedding_Centroid_ID"] = [f"vec_{index:03d}" for index in range(1, len(themes) + 1)]
     return uniquify_theme_names(themes)
 
 
@@ -801,41 +1259,108 @@ def build_theme_classification(
     """Run the local MVP theme classification pipeline."""
     scoped = data.reset_index(drop=True).copy()
     payloads = [build_semantic_payload(row) for _, row in scoped.iterrows()]
-    embeddings = build_local_embeddings(payloads)
-    relationships = build_similarity_relationships(scoped, embeddings, top_k, relationship_threshold)
+    embeddings = build_embedding_layer(scoped, payloads)
+    hybrid_matrix, component_lookup = build_hybrid_similarity_matrix(scoped, embeddings)
+    relationships = build_similarity_relationships(
+        scoped,
+        hybrid_matrix,
+        top_k,
+        relationship_threshold,
+        component_lookup,
+    )
     risk_ids = scoped["Group_ID"].astype(str).tolist()
     if target_theme_count is not None and target_theme_count < len(risk_ids):
-        clusters = cluster_risks_to_target(risk_ids, embeddings, target_theme_count)
+        clusters = cluster_risks_to_target_by_similarity(risk_ids, hybrid_matrix, target_theme_count)
     else:
         clusters = cluster_risks(risk_ids, relationships, cluster_threshold)
     clusters = merge_duplicate_theme_clusters(scoped, clusters)
-    themes = build_theme_records(scoped, clusters, relationships)
+    themes = build_theme_records(scoped, clusters, relationships, hybrid_matrix, component_lookup)
     dimension_summary = build_dimension_count_summary(scoped)
     return themes, relationships, dimension_summary
 
 
-def build_theme_fallback_analysis(themes: pd.DataFrame, relationships: pd.DataFrame) -> str:
-    """Create a deterministic narrative when live GPT analysis is unavailable."""
+def format_theme_list(values: object, fallback: str = "not available") -> str:
+    """Format list-like theme evidence for narrative fallback text."""
+    if isinstance(values, list):
+        clean_values = [str(value).strip() for value in values if str(value).strip()]
+        return ", ".join(clean_values) if clean_values else fallback
+    clean = str(values or "").strip()
+    return clean if clean else fallback
+
+
+def build_theme_fallback_sections(themes: pd.DataFrame, relationships: pd.DataFrame) -> tuple[str, str]:
+    """Create two deterministic theme-analysis cards when live GPT analysis is unavailable."""
     if themes.empty:
-        return "No theme candidates were generated for the current filtered inventory."
+        message = "No theme candidates were generated for the current filtered inventory."
+        return message, "No priority theme analysis is available until at least one theme passes the final criteria."
 
     cross_business = int(themes["Cross_Business"].sum())
     emerging = int(themes["Emerging_Indicator"].sum())
-    top_themes = themes.sort_values(["Risk_Count", "Average_Similarity"], ascending=[False, False]).head(5)
-    top_lines = [
-        f"- **{row.Theme_Name}**: {int(row.Risk_Count)} risks; {row.Potential_Gap}"
-        for row in top_themes.itertuples(index=False)
-    ]
     near_duplicates = 0
     if not relationships.empty:
         near_duplicates = int((relationships["Relationship"] == "Near duplicate").sum())
 
-    return "\n".join(
+    top_themes = themes.sort_values(["Risk_Count", "Average_Similarity"], ascending=[False, False]).head(6)
+    priority_themes = themes.sort_values(
+        ["Material_Risks", "Risk_Count", "Average_Similarity"],
+        ascending=[False, False, False],
+    ).head(3)
+    summary_lines = [
+        f"Generated **{len(themes)} suggested risk themes** from the selected inventory scope. "
+        f"**{cross_business}** themes span more than one business division, **{emerging}** are emerging cross-taxonomy clusters, "
+        f"and **{near_duplicates}** near-duplicate relationships were detected.",
+        "",
+        "**Theme definitions, linkage, and evidence**",
+    ]
+    priority_lines = ["**Most important suggested themes**"]
+    hotspot_lines = ["**Cross-division inconsistency hotspots**"]
+    review_lines = ["**Human-review priorities**"]
+
+    for row in top_themes.itertuples(index=False):
+        divisions = format_theme_list(row.Business_Divisions)
+        gcrs_values = format_theme_list(getattr(row, "GCRS_Values", ""))
+        drivers = format_theme_list(row.Key_Drivers, row.Primary_Driver or "not available")
+        risk_ids = format_theme_list(getattr(row, "Risk_IDs", [])[:4] if isinstance(getattr(row, "Risk_IDs", []), list) else getattr(row, "Risk_IDs", ""))
+        summary_lines.append(
+            f"- **{row.Theme_Name}** spans {divisions or 'one business division'}; "
+            f"GCRS coverage includes {gcrs_values}; driver evidence is {drivers}. "
+            f"Risk evidence includes {risk_ids}; average internal similarity is {float(row.Average_Similarity):.2f}."
+        )
+
+    for row in priority_themes.itertuples(index=False):
+        divisions = format_theme_list(row.Business_Divisions)
+        gcrs_values = format_theme_list(getattr(row, "GCRS_Values", ""))
+        drivers = format_theme_list(row.Key_Drivers, row.Primary_Driver or "not available")
+        risk_ids = format_theme_list(getattr(row, "Risk_IDs", [])[:4] if isinstance(getattr(row, "Risk_IDs", []), list) else getattr(row, "Risk_IDs", ""))
+        priority_lines.append(
+            f"- **{row.Theme_Name}** should be reviewed first: {int(row.Risk_Count)} risks, "
+            f"{int(row.Material_Risks)} material risks, confidence {float(row.Confidence_Score):.2f}. "
+            f"Support: IDs {risk_ids}; businesses {divisions}; GCRS {gcrs_values}; driver evidence {drivers}. "
+            "Transmission, exposure, and managed-action linkage should be validated where not explicit in the records."
+        )
+
+        metrics = format_theme_list(getattr(row, "Risk_Metrics", ""))
+        methods = format_theme_list(getattr(row, "Assessment_Methods", ""))
+        hotspot_lines.append(
+            f"- **{row.Theme_Name}**: metrics include {metrics}; assessment methods include {methods}. "
+            f"{row.Potential_Gap}"
+        )
+        review_lines.append(f"- **{row.Theme_Name}**: {row.Governance_Check}")
+
+    theme_summary = "\n".join(summary_lines)
+    theme_analysis = "\n".join(
         [
-            f"Generated **{len(themes)} suggested risk themes** for the current inventory.",
-            f"Cross-business themes: **{cross_business}**. Emerging clusters: **{emerging}**. Near-duplicate relationships: **{near_duplicates}**.",
+            *priority_lines,
             "",
-            "Priority review themes:",
-            *top_lines,
+            *hotspot_lines,
+            "",
+            *review_lines,
         ]
     )
+    return theme_summary, theme_analysis
+
+
+def build_theme_fallback_analysis(themes: pd.DataFrame, relationships: pd.DataFrame) -> str:
+    """Create a deterministic narrative when live GPT analysis is unavailable."""
+    theme_summary, theme_analysis = build_theme_fallback_sections(themes, relationships)
+    return f"**Theme Summary**\n{theme_summary}\n\n**Theme Analysis**\n{theme_analysis}"
