@@ -15,7 +15,7 @@ except Exception:
 
 from .analysis import build_compare_fallback_analysis, build_taxonomy_fallback_summary
 from .settings import AI_CONTEXT_COLUMNS, DEFAULT_MODEL
-from .themes import build_theme_fallback_analysis
+from .themes import build_theme_fallback_sections
 from .utils import format_top_counts, top_counts
 
 
@@ -120,54 +120,80 @@ Risk records:
         return fallback + "\n\n_Local fallback used because live analysis is unavailable._"
 
 
+def split_theme_ai_sections(text: str, fallback_summary: str, fallback_analysis: str) -> tuple[str, str]:
+    """Split a two-section GPT theme response into dashboard card bodies."""
+    clean = text.strip()
+    summary_match = re.search(r"(?im)^#{1,3}\s*Theme Summary\s*$", clean)
+    analysis_match = re.search(r"(?im)^#{1,3}\s*Theme Analysis\s*$", clean)
+    if not summary_match or not analysis_match or analysis_match.start() <= summary_match.end():
+        return fallback_summary, clean or fallback_analysis
+
+    summary = clean[summary_match.end() : analysis_match.start()].strip()
+    analysis = clean[analysis_match.end() :].strip()
+    return summary or fallback_summary, analysis or fallback_analysis
+
+
 def get_theme_ai_analysis(
     data: pd.DataFrame,
     themes: pd.DataFrame,
     relationships: pd.DataFrame,
     model: str,
-) -> str:
+) -> tuple[str, str]:
     """Generate a theme-classification narrative with GPT, falling back locally."""
-    fallback = build_theme_fallback_analysis(themes, relationships)
+    fallback_summary, fallback_analysis = build_theme_fallback_sections(themes, relationships)
     if not openai_is_configured():
-        return fallback
+        return fallback_summary, fallback_analysis
+    if themes.empty:
+        return fallback_summary, fallback_analysis
 
-    theme_context = themes[
-        [
-            "Theme_ID",
-            "Theme_Name",
-            "Theme_Summary",
-            "Taxonomy_Alignment",
-            "Business_Divisions",
-            "Risk_Count",
-            "Material_Risks",
-            "Non_Material_Risks",
-            "Risk_IDs",
-            "Common_Topic",
-            "Key_Drivers",
-            "Emerging_Indicator",
-            "Cross_Business",
-            "Average_Similarity",
-            "Confidence_Score",
-            "Review_Required",
-            "Governance_Check",
-            "Potential_Gap",
-        ]
-    ].head(40)
+    theme_columns = [
+        "Theme_ID",
+        "Theme_Name",
+        "Taxonomy_Alignment",
+        "Business_Divisions",
+        "GCRS_Values",
+        "Risk_Count",
+        "Material_Risks",
+        "Non_Material_Risks",
+        "Risk_IDs",
+        "Common_Topic",
+        "Key_Drivers",
+        "Primary_Driver",
+        "Primary_Metric",
+        "Primary_Method",
+        "Risk_Metrics",
+        "Assessment_Methods",
+        "Emerging_Indicator",
+        "Cross_Business",
+        "Review_Required",
+        "Governance_Check",
+        "Potential_Gap",
+    ]
+    theme_context = themes[[column for column in theme_columns if column in themes.columns]].head(40)
     relationship_context = relationships.head(80) if not relationships.empty else relationships
     system_prompt = (
         "You are a risk theme classification analyst. Use only the supplied records and computed facts. "
         "Existing Taxonomy_L1, Taxonomy_L2, and regulatory classifications are authoritative and must not be overwritten. "
         "Only discuss suggested risk themes, similar risk relationships, emerging clusters, and cross-business linkages. "
-        "Explain grouping through risk driver, transmission channel, exposure, and management action where the data supports it. "
+        "Explain grouping first through risk title and description semantics, then risk metric and Impact_Comment, "
+        "then taxonomy and driver/root cause where the data supports it. "
         "Do not analyze, aggregate, or compare Impact_Numbers. Write concise Markdown."
     )
     user_prompt = f"""
 Analyze these suggested risk themes for an executive risk inventory view.
 
-Address:
-1. The most important suggested Risk Themes and cross-business linkages.
-2. Potential Risk_Metric or Assessment_Method gaps within themes across Business_Division.
-3. Emerging clusters and human-review priorities.
+Return exactly two Markdown sections using these headings:
+## Theme Summary
+- State how many suggested themes exist in the selected scope.
+- Define and describe the main themes in business language.
+- Summarize linkage and evidence using theme summaries, drivers, common topics, business divisions, GCRS, and sample Risk_IDs where useful.
+- Do not mention similarity scores, confidence scores, embedding/vector scores, hybrid weights, or other model-scoring mechanics.
+
+## Theme Analysis
+- Suggest the 2-3 most important themes and support each with evidence such as driver, transmission channel, exposure, cross-business linkage, Risk_ID, GCRS, or Business_Division. If transmission, exposure, or managed-action evidence is not explicit, say so.
+- Identify cross-division inconsistency hotspots for Risk_Metric and Assessment_Method, especially key Assessment_Method gaps.
+- Add human-review priorities for mixed category, evidence quality, repeated themes, or governance concerns.
+- Keep the language suitable for CRO and senior-management reporting; translate model evidence into business rationale.
 
 Suggested theme mapping:
 {theme_context.to_json(orient="records", force_ascii=False, indent=2)}
@@ -180,9 +206,10 @@ Filtered risk records:
 """
 
     try:
-        return request_openai_text(model, system_prompt, user_prompt, 2200)
+        response = request_openai_text(model, system_prompt, user_prompt, 2600)
+        return split_theme_ai_sections(response, fallback_summary, fallback_analysis)
     except Exception:
-        return fallback + "\n\n_Local fallback used because live analysis is unavailable._"
+        return fallback_summary, fallback_analysis + "\n\n_Local fallback used because live analysis is unavailable._"
 
 
 def parse_json_object(text: str) -> dict[str, Any]:

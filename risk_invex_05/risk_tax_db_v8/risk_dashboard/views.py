@@ -17,6 +17,39 @@ from .themes import THEME_REVIEW_ACTIONS, build_theme_classification
 from .utils import unique_join
 
 
+THEME_DETAIL_RISK_TABLE_COLUMNS = [
+    "Group_ID",
+    "Taxonomy_L0",
+    "Taxonomy_L1",
+    "Taxonomy_L2",
+    "Risk_Title",
+    "Impact_Rating",
+    "Impact_Numbers",
+    "Business_Division",
+    "Risk_Metric",
+    "Assessment_Method",
+    "Overall_Materiality",
+    "Likelihood_Rating",
+]
+
+RISK_TABLE_COLUMN_LABELS = {
+    "Group_ID": "ID",
+    "Taxonomy_L0": "Taxonomy L0",
+    "Taxonomy_L1": "Taxonomy L1",
+    "Taxonomy_L2": "Taxonomy L2",
+    "Risk_Title": "Risk",
+    "Risk_Status": "Status",
+    "Risk_Type": "Type",
+    "Impact_Rating": "Impact Rating",
+    "Impact_Numbers": "Impact Numbers",
+    "Business_Division": "Business Division",
+    "Risk_Metric": "Metric",
+    "Assessment_Method": "Method",
+    "Overall_Materiality": "Materiality",
+    "Likelihood_Rating": "Likelihood Rating",
+}
+
+
 def render_ai_card(title: str, markdown_body: str) -> None:
     """Render a bordered narrative analysis block."""
     with st.container(border=True):
@@ -27,13 +60,99 @@ def render_ai_card(title: str, markdown_body: str) -> None:
         st.markdown(markdown_body)
 
 
+def table_column_class(column: object) -> str:
+    """Create a stable CSS class name for a rendered table column."""
+    clean = "".join(character if character.isalnum() else "-" for character in str(column).lower())
+    clean = "-".join(part for part in clean.split("-") if part)
+    return f"col-{clean or 'value'}"
+
+
+def format_compact_number(value: object) -> str:
+    """Format numeric impact values as 0.00 / k / m / bn."""
+    if value is None or pd.isna(value):
+        return ""
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return str(value)
+
+    absolute = abs(number)
+    if absolute >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.2f}bn"
+    if absolute >= 1_000_000:
+        return f"{number / 1_000_000:.2f}m"
+    if absolute >= 1_000:
+        return f"{number / 1_000:.2f}k"
+    return f"{number:.2f}"
+
+
+def render_table_cell(value: object, column: str, bar_columns: set[str], bool_columns: set[str]) -> str:
+    """Render a table cell with optional score-bar and boolean-badge treatments."""
+    if column in bool_columns:
+        truthy = bool(value) if isinstance(value, bool) else str(value).strip().lower() in {"true", "yes", "1"}
+        label = "True" if truthy else "False"
+        badge_class = "true" if truthy else "false"
+        return f'<span class="bool-badge bool-badge-{badge_class}">{label}</span>'
+
+    if column in bar_columns:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return escape(str(value or ""))
+        percent = max(0.0, min(1.0, score)) * 100
+        return (
+            '<div class="score-bar-cell">'
+            '<div class="score-bar-track">'
+            f'<span class="score-bar-fill" style="width: {percent:.0f}%"></span>'
+            "</div>"
+            f'<span class="score-bar-label">{score:.2f}</span>'
+            "</div>"
+        )
+
+    if value is None or (not isinstance(value, (list, tuple, dict, set)) and pd.isna(value)):
+        return ""
+    if column == "Impact Numbers":
+        return escape(format_compact_number(value))
+    return escape(str(value))
+
+
+def render_html_table(
+    data: pd.DataFrame,
+    max_rows: int | None = None,
+    wide: bool = False,
+    bar_columns: set[str] | None = None,
+    bool_columns: set[str] | None = None,
+) -> None:
+    """Render a styled read-only table with a white body and grey header."""
+    table_data = data.head(max_rows).copy() if max_rows else data.copy()
+    wrapper_class = "risk-table-wrap risk-table-wrap-wide" if wide else "risk-table-wrap"
+    table_class = "risk-html-table risk-html-table-wide" if wide else "risk-html-table"
+    active_bar_columns = bar_columns or set()
+    active_bool_columns = bool_columns or set()
+
+    headers = "".join(
+        f'<th class="{table_column_class(column)}">{escape(str(column))}</th>' for column in table_data.columns
+    )
+    body_rows = []
+    for row in table_data.to_dict("records"):
+        cells = "".join(
+            f'<td class="{table_column_class(column)}">'
+            f"{render_table_cell(row.get(column, ''), str(column), active_bar_columns, active_bool_columns)}"
+            "</td>"
+            for column in table_data.columns
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    html = f'<table class="{table_class}"><thead><tr>{headers}</tr></thead><tbody>{"".join(body_rows)}</tbody></table>'
+    st.markdown(f'<div class="{wrapper_class}">{html}</div>', unsafe_allow_html=True)
+
+
 def metric_cards(data: pd.DataFrame) -> None:
     """Render top-level count metrics for the filtered inventory."""
     material_count = int(data["Is_Material"].sum())
 
     col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Risks", f"{len(data):,}")
-    col2.metric("Taxonomy L1 Groups", f"{data['Taxonomy_L1'].nunique():,}")
+    col1.metric("Total Risks", f"{len(data):,}")
+    col2.metric("Taxonomy L1", f"{data['Taxonomy_L1'].nunique():,}")
     col3.metric("Assessment Methods", f"{data['Assessment_Method'].nunique():,}")
     col4.metric("Risk Metrics", f"{data['Risk_Metric'].nunique():,}")
     col5.metric("Material Risks", f"{material_count:,}")
@@ -84,7 +203,7 @@ def render_group_summary(data: pd.DataFrame, group_summary: pd.DataFrame, model:
                 "L2_Count": "Taxonomy L2",
             }
         )
-        st.dataframe(display, width="stretch", hide_index=True)
+        render_html_table(display)
 
     with st.spinner("Generating Taxonomy L1 analysis..."):
         summary_text = get_taxonomy_ai_summary(data, group_summary, model)
@@ -209,10 +328,58 @@ def format_list_cell(values: object) -> str:
     return str(values or "")
 
 
-def render_theme_review_editor(themes: pd.DataFrame) -> None:
-    """Render the human review workflow table and persist reviewer edits."""
+def wrap_chart_label(value: object, width: int = 22) -> str:
+    """Split a chart axis label into two readable lines without truncating it."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= width:
+        return text
+
+    words = text.split()
+    if len(words) <= 1:
+        return text
+
+    best_split = 1
+    best_score = float("inf")
+    for index in range(1, len(words)):
+        left = " ".join(words[:index])
+        right = " ".join(words[index:])
+        score = abs(len(left) - len(right)) + max(0, len(left) - width) + max(0, len(right) - width)
+        if score < best_score:
+            best_score = score
+            best_split = index
+
+    return f"{' '.join(words[:best_split])}\n{' '.join(words[best_split:])}"
+
+
+def sync_theme_review_state(themes: pd.DataFrame) -> None:
+    """Persist review-control values into the shared review state."""
     if "theme_review_state" not in st.session_state:
         st.session_state.theme_review_state = {}
+
+    for theme in themes.to_dict("records"):
+        theme_id = theme["Theme_ID"]
+        name_key = f"review_name_{theme_id}"
+        action_key = f"review_action_{theme_id}"
+        reviewer_key = f"reviewer_{theme_id}"
+        notes_key = f"review_notes_{theme_id}"
+        if name_key in st.session_state:
+            st.session_state.theme_review_state[theme_id] = {
+                "Suggested Risk Theme": st.session_state[name_key],
+                "Review Action": st.session_state.get(action_key, theme["Review_Action"]),
+                "Reviewed By": st.session_state.get(reviewer_key, ""),
+                "Human Notes": st.session_state.get(notes_key, ""),
+            }
+
+
+def render_theme_review_editor(themes: pd.DataFrame) -> None:
+    """Render the human review workflow table."""
+    if themes.empty:
+        st.info("No suggested themes met the 0.50 confidence threshold for review.")
+        return
+
+    sync_theme_review_state(themes)
 
     rows = []
     for theme in themes.to_dict("records"):
@@ -226,11 +393,10 @@ def render_theme_review_editor(themes: pd.DataFrame) -> None:
                 "Taxonomy Alignment": format_list_cell(theme["Taxonomy_Alignment"]),
                 "Common Topic": theme.get("Common_Topic", ""),
                 "Key Drivers": format_list_cell(theme.get("Key_Drivers", [])),
-                "Confidence": theme.get("Confidence_Score", 0.0),
+                "Confidence Score": theme.get("Confidence_Score", 0.0),
                 "Review Required": theme.get("Review_Required", False),
                 "Governance Check": theme.get("Governance_Check", ""),
                 "Risk IDs": format_list_cell(theme["Risk_IDs"]),
-                "Emerging": theme["Emerging_Indicator"],
                 "Potential Gap": theme["Potential_Gap"],
                 "Review Action": state.get("Review Action", theme["Review_Action"]),
                 "Reviewed By": state.get("Reviewed By", ""),
@@ -238,50 +404,61 @@ def render_theme_review_editor(themes: pd.DataFrame) -> None:
             }
         )
 
-    edited = st.data_editor(
+    render_html_table(
         pd.DataFrame(rows),
-        width="stretch",
-        hide_index=True,
-        num_rows="fixed",
-        disabled=[
-            "Theme ID",
-            "Risk Count",
-            "Business Divisions",
-            "Taxonomy Alignment",
-            "Common Topic",
-            "Key Drivers",
-            "Confidence",
-            "Review Required",
-            "Governance Check",
-            "Risk IDs",
-            "Emerging",
-            "Potential Gap",
-        ],
-        column_config={
-            "Review Action": st.column_config.SelectboxColumn(
-                "Review Action",
-                options=THEME_REVIEW_ACTIONS,
-                required=True,
-            ),
-            "Suggested Risk Theme": st.column_config.TextColumn("Suggested Risk Theme", width="medium"),
-            "Human Notes": st.column_config.TextColumn("Human Notes", width="large"),
-        },
+        wide=True,
+        bar_columns={"Confidence Score"},
+        bool_columns={"Review Required"},
     )
 
-    st.session_state.theme_review_state = {
-        row["Theme ID"]: {
-            "Suggested Risk Theme": row["Suggested Risk Theme"],
-            "Review Action": row["Review Action"],
-            "Reviewed By": row["Reviewed By"],
-            "Human Notes": row["Human Notes"],
-        }
-        for row in edited.to_dict("records")
-    }
+
+def render_theme_review_controls(themes: pd.DataFrame) -> None:
+    """Render collapsed reviewer inputs for updating theme decisions."""
+    if themes.empty:
+        st.info("No suggested themes met the 0.50 confidence threshold for review.")
+        return
+
+    sync_theme_review_state(themes)
+    st.markdown('<div class="review-controls-title">Update review decisions</div>', unsafe_allow_html=True)
+    for theme in themes.to_dict("records"):
+        theme_id = theme["Theme_ID"]
+        state = st.session_state.theme_review_state.get(theme_id, {})
+        name_key = f"review_name_{theme_id}"
+        action_key = f"review_action_{theme_id}"
+        reviewer_key = f"reviewer_{theme_id}"
+        notes_key = f"review_notes_{theme_id}"
+
+        st.session_state.setdefault(name_key, state.get("Suggested Risk Theme", theme["Theme_Name"]))
+        st.session_state.setdefault(action_key, state.get("Review Action", theme["Review_Action"]))
+        st.session_state.setdefault(reviewer_key, state.get("Reviewed By", ""))
+        st.session_state.setdefault(notes_key, state.get("Human Notes", ""))
+
+        current_action = st.session_state[action_key]
+        if current_action not in THEME_REVIEW_ACTIONS:
+            st.session_state[action_key] = theme["Review_Action"]
+
+        with st.container(border=True):
+            st.markdown(f"**{escape(theme_id)} | {escape(theme['Theme_Name'])}**")
+            name_col, action_col, reviewer_col = st.columns([2.3, 1.2, 1.1])
+            name_col.text_input("Suggested Risk Theme", key=name_key)
+            action_col.selectbox(
+                "Review Action",
+                options=THEME_REVIEW_ACTIONS,
+                index=THEME_REVIEW_ACTIONS.index(st.session_state[action_key]),
+                key=action_key,
+            )
+            reviewer_col.text_input("Reviewed By", key=reviewer_key)
+            st.text_area("Human Notes", key=notes_key, height=72)
 
 
 def render_theme_detail_cards(data: pd.DataFrame, themes: pd.DataFrame) -> None:
     """Render expandable cards with theme summaries and mapped risks."""
     st.subheader("Theme Detail")
+    st.caption("Open a theme to review the AI-generated summary, core metrics, and the underlying risk records.")
+    if themes.empty:
+        st.info("No theme details are available because no suggested themes met the 0.50 confidence threshold.")
+        return
+
     for theme in themes.sort_values(["Risk_Count", "Average_Similarity"], ascending=[False, False]).to_dict(
         "records"
     ):
@@ -291,25 +468,31 @@ def render_theme_detail_cards(data: pd.DataFrame, themes: pd.DataFrame) -> None:
         with st.expander(label):
             st.markdown(theme["Theme_Summary"])
             cols = st.columns(4)
-            cols[0].metric("Avg Similarity", f"{float(theme['Average_Similarity']):.3f}")
-            cols[1].metric("Divisions", f"{len(theme['Business_Divisions'])}")
-            cols[2].metric("Taxonomy L1", f"{theme_risks['Taxonomy_L1'].nunique()}")
+            cols[0].metric("Risks", f"{int(theme['Risk_Count']):,}")
+            cols[1].metric("Material Risks", f"{int(theme.get('Material_Risks', 0)):,}")
+            cols[2].metric("Divisions", f"{len(theme['Business_Divisions'])}")
             cols[3].metric("Metrics", f"{theme_risks['Risk_Metric'].nunique()}")
-            render_risk_table(theme_risks)
+            render_risk_table(theme_risks, columns=THEME_DETAIL_RISK_TABLE_COLUMNS)
 
 
-def render_count_ring_chart(summary: pd.DataFrame, dimension: str, title: str) -> None:
+def render_count_ring_chart(summary: pd.DataFrame, dimension: str, title: str, chart_height: int = 220) -> None:
     """Render a compact ring chart for selected-scope counts."""
     chart_data = summary[summary["Dimension"] == dimension].copy()
     if chart_data.empty:
         st.info(f"No {dimension} data is available for the current filter.")
         return
 
-    chart = (
+    chart_data = chart_data.sort_values("Value").copy()
+    total_count = max(1, int(chart_data["Risk_Count"].sum()))
+    chart_data["Share"] = chart_data["Risk_Count"] / total_count
+    chart_data["Count_Label"] = chart_data["Risk_Count"].where(chart_data["Share"] >= 0.08, "")
+
+    arcs = (
         alt.Chart(chart_data)
-        .mark_arc(innerRadius=54, outerRadius=88, stroke="#fff", strokeWidth=2)
+        .mark_arc(innerRadius=42, outerRadius=72, stroke="#fff", strokeWidth=2)
         .encode(
-            theta=alt.Theta("Risk_Count:Q", title="Risk count"),
+            theta=alt.Theta("Risk_Count:Q", title="Risk count", stack=True),
+            order=alt.Order("Value:N", sort="ascending"),
             color=alt.Color(
                 "Value:N",
                 title=dimension,
@@ -320,7 +503,30 @@ def render_count_ring_chart(summary: pd.DataFrame, dimension: str, title: str) -
                 alt.Tooltip("Risk_Count:Q", title="Risks"),
             ],
         )
-        .properties(height=230, title=title)
+    )
+    labels = (
+        alt.Chart(chart_data)
+        .mark_text(
+            radius=57,
+            color="#fff",
+            fontSize=10,
+            fontWeight="bold",
+            baseline="middle",
+            align="center",
+        )
+        .encode(
+            theta=alt.Theta("Risk_Count:Q", stack="center"),
+            order=alt.Order("Value:N", sort="ascending"),
+            text=alt.Text("Count_Label:N"),
+        )
+    )
+    chart = (
+        (arcs + labels)
+        .properties(
+            height=chart_height,
+            title=alt.TitleParams(text=title, anchor="middle", offset=10),
+            padding={"top": 24, "right": 18, "bottom": 36, "left": 18},
+        )
     )
     st.altair_chart(chart, width="stretch")
 
@@ -335,25 +541,36 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
     if record_count >= 240:
         default_target = min(record_count, 25)
 
-    control_1, control_2, control_3 = st.columns(3)
-    with control_1:
-        target_theme_count = st.slider(
-            "Target themes (max)",
-            min_value=1,
-            max_value=max(1, min(60, record_count)),
-            value=max(1, default_target),
-            step=1,
+    target_theme_count = max(1, default_target)
+    top_k = 8
+    relationship_threshold = 0.72
+    with st.expander("Theme grouping controls", expanded=False):
+        st.markdown(
+            f"""
+            - **Target themes (max):** Sets the executive-level upper bound. The default is about one theme per 12 risks, capped at 30, and 25 for inventories above 240 risks.
+            - **Similar risks per risk:** Controls how many nearest neighbors each risk checks before clustering. Higher values find broader relationships but can add noise.
+            - **Relationship threshold:** Filters weak pairings using the hybrid score. `0.72` means related, while `0.82+` is treated as same-theme evidence.
+            """
         )
-    with control_2:
-        top_k = st.slider("Similar risks per risk", min_value=2, max_value=15, value=8, step=1)
-    with control_3:
-        relationship_threshold = st.slider(
-            "Relationship threshold",
-            min_value=0.50,
-            max_value=0.95,
-            value=0.72,
-            step=0.01,
-        )
+        control_1, control_2, control_3 = st.columns(3)
+        with control_1:
+            target_theme_count = st.slider(
+                "Target themes (max)",
+                min_value=1,
+                max_value=max(1, min(60, record_count)),
+                value=target_theme_count,
+                step=1,
+            )
+        with control_2:
+            top_k = st.slider("Similar risks per risk", min_value=2, max_value=15, value=top_k, step=1)
+        with control_3:
+            relationship_threshold = st.slider(
+                "Relationship threshold",
+                min_value=0.50,
+                max_value=0.95,
+                value=relationship_threshold,
+                step=0.01,
+            )
 
     themes, relationships, dimension_summary = build_theme_classification(
         data,
@@ -362,73 +579,121 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
         target_theme_count=target_theme_count,
     )
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Suggested Themes", f"{len(themes):,}")
-    col2.metric("Similar Relationships", f"{len(relationships):,}")
-    col3.metric("Material Risks", f"{int(data['Is_Material'].sum()):,}")
-    col4.metric("Non-Material Risks", f"{int(len(data) - data['Is_Material'].sum()):,}")
+    st.caption(
+        f"{len(themes):,} suggested themes are shown. Themes with confidence below 0.50, fewer than 2 risks, "
+        "or zero average internal similarity are excluded from the charts, AI summary, review workflow, and detail cards."
+    )
 
-    with st.spinner("Generating theme analysis..."):
-        analysis_text = get_theme_ai_analysis(data, themes, relationships, model)
-    render_ai_card("AI Theme Analysis", analysis_text)
-
-    chart_left, chart_right = st.columns([0.52, 0.48])
+    chart_height = 220
+    chart_left, chart_right = st.columns([0.40, 0.60])
     with chart_left:
-        chart_data = themes.sort_values("Risk_Count", ascending=False).head(12).copy()
-        materiality_data = chart_data.melt(
-            id_vars=["Theme_ID", "Theme_Name", "Risk_Count", "Average_Similarity"],
-            value_vars=["Material_Risks", "Non_Material_Risks"],
-            var_name="Materiality",
-            value_name="Materiality_Count",
-        )
-        materiality_data["Materiality"] = materiality_data["Materiality"].replace(
-            {
-                "Material_Risks": "Material",
-                "Non_Material_Risks": "Non-Material",
-            }
-        )
-        materiality_label_data = materiality_data[materiality_data["Materiality_Count"] > 0].copy()
-        bars = (
-            alt.Chart(materiality_data)
-            .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3)
-            .encode(
-                x=alt.X(
-                    "Materiality_Count:Q",
-                    title="Risk count",
-                    axis=alt.Axis(tickMinStep=1),
-                    stack="zero",
-                ),
-                y=alt.Y("Theme_Name:N", title=None, sort="-x"),
-                color=alt.Color(
-                    "Materiality:N",
-                    title="Materiality",
-                    scale=alt.Scale(domain=["Material", "Non-Material"], range=["#d64545", "#7d746b"]),
-                ),
-                tooltip=[
-                    alt.Tooltip("Theme_ID:N", title="Theme ID"),
-                    alt.Tooltip("Theme_Name:N", title="Theme"),
-                    alt.Tooltip("Risk_Count:Q", title="Risks"),
-                    alt.Tooltip("Materiality:N", title="Materiality"),
-                    alt.Tooltip("Materiality_Count:Q", title="Materiality count"),
-                    alt.Tooltip("Average_Similarity:Q", title="Avg similarity", format=".3f"),
-                ],
+        if themes.empty:
+            st.info("No suggested themes met the final theme criteria for the current filter.")
+        else:
+            chart_data = themes.sort_values("Risk_Count", ascending=False).head(10).copy()
+            chart_data["Theme_Label"] = chart_data["Theme_Name"].apply(lambda value: wrap_chart_label(value))
+            theme_sort = chart_data["Theme_Label"].tolist()
+            max_count = max(1, int(chart_data["Risk_Count"].max()))
+            x_domain = [0, max_count + max(1, round(max_count * 0.22))]
+            materiality_data = chart_data.melt(
+                id_vars=["Theme_ID", "Theme_Name", "Theme_Label", "Risk_Count", "Average_Similarity"],
+                value_vars=["Material_Risks", "Non_Material_Risks"],
+                var_name="Materiality",
+                value_name="Materiality_Count",
             )
-        )
-        labels = (
-            alt.Chart(materiality_label_data)
-            .mark_text(align="center", baseline="middle", color="#fff", fontSize=11, fontWeight="bold")
-            .encode(
-                x=alt.X("Materiality_Count:Q", stack="center"),
-                y=alt.Y("Theme_Name:N", title=None, sort="-x"),
-                detail="Materiality:N",
-                text=alt.Text("Materiality_Count:Q", format="d"),
+            materiality_data["Materiality"] = materiality_data["Materiality"].replace(
+                {
+                    "Material_Risks": "Material",
+                    "Non_Material_Risks": "Non-Material",
+                }
             )
-        )
-        chart = (bars + labels).properties(
-            height=max(190, 20 * len(chart_data)),
-            title="Suggested Risk Themes by Overall_Materiality Count",
-        )
-        st.altair_chart(chart, width="stretch")
+            materiality_data["Materiality_Order"] = materiality_data["Materiality"].map(
+                {"Material": 0, "Non-Material": 1}
+            )
+            materiality_data = materiality_data.sort_values(
+                ["Theme_Label", "Materiality_Order"],
+                ascending=[True, True],
+            )
+            materiality_data["Segment_End"] = materiality_data.groupby("Theme_Label")[
+                "Materiality_Count"
+            ].cumsum()
+            materiality_data["Segment_Start"] = materiality_data["Segment_End"] - materiality_data[
+                "Materiality_Count"
+            ]
+            materiality_data["Segment_Center"] = (
+                materiality_data["Segment_Start"] + (materiality_data["Materiality_Count"] / 2)
+            )
+            materiality_label_data = materiality_data[materiality_data["Materiality_Count"] > 0].copy()
+            bars = (
+                alt.Chart(materiality_data)
+                .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3)
+                .encode(
+                    x=alt.X(
+                        "Segment_Start:Q",
+                        title="Risk count",
+                        axis=alt.Axis(tickMinStep=1),
+                        scale=alt.Scale(domain=x_domain),
+                    ),
+                    x2=alt.X2("Segment_End:Q"),
+                    y=alt.Y(
+                        "Theme_Label:N",
+                        title=None,
+                        sort=theme_sort,
+                        axis=alt.Axis(labelLimit=220, labelLineHeight=13),
+                    ),
+                    color=alt.Color(
+                        "Materiality:N",
+                        title="Materiality",
+                        scale=alt.Scale(domain=["Material", "Non-Material"], range=["#d64545", "#7d746b"]),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Theme_ID:N", title="Theme ID"),
+                        alt.Tooltip("Theme_Name:N", title="Theme"),
+                        alt.Tooltip("Risk_Count:Q", title="Risks"),
+                        alt.Tooltip("Materiality:N", title="Materiality"),
+                        alt.Tooltip("Materiality_Count:Q", title="Materiality count"),
+                        alt.Tooltip("Average_Similarity:Q", title="Avg similarity", format=".3f"),
+                    ],
+                )
+            )
+            labels = (
+                alt.Chart(materiality_label_data)
+                .mark_text(
+                    align="center",
+                    baseline="middle",
+                    color="#fff",
+                    stroke="#5c5650",
+                    strokeWidth=0.25,
+                    fontSize=11,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x=alt.X("Segment_Center:Q", scale=alt.Scale(domain=x_domain)),
+                    y=alt.Y("Theme_Label:N", title=None, sort=theme_sort),
+                    text=alt.Text("Materiality_Count:Q", format="d"),
+                )
+            )
+            total_labels = (
+                alt.Chart(chart_data)
+                .mark_text(
+                    align="left",
+                    baseline="middle",
+                    dx=6,
+                    color="#5c5650",
+                    fontSize=10,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x=alt.X("Risk_Count:Q", scale=alt.Scale(domain=x_domain)),
+                    y=alt.Y("Theme_Label:N", title=None, sort=theme_sort),
+                    text=alt.Text("Risk_Count:Q", format="d"),
+                )
+            )
+            chart = (bars + labels + total_labels).properties(
+                height=max(chart_height, 34 * len(chart_data)),
+                title="Suggested Risk Themes by Overall_Materiality Count",
+            )
+            st.altair_chart(chart, width="stretch")
 
     with chart_right:
         if dimension_summary.empty:
@@ -436,66 +701,83 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
         else:
             ring_left, ring_right = st.columns(2)
             with ring_left:
-                render_count_ring_chart(dimension_summary, "Business Division", "Business Division Count")
+                render_count_ring_chart(
+                    dimension_summary,
+                    "Business Division",
+                    "Business Division Count",
+                    chart_height=chart_height,
+                )
             with ring_right:
-                render_count_ring_chart(dimension_summary, "GCRS", "GCRS Count")
+                render_count_ring_chart(
+                    dimension_summary,
+                    "GCRS",
+                    "GCRS Count",
+                    chart_height=chart_height,
+                )
 
-    st.subheader("Human Review Workflow")
-    render_theme_review_editor(themes)
+    st.subheader("AI Theme Analysis")
+    with st.spinner("Generating theme analysis..."):
+        theme_summary_text, theme_analysis_text = get_theme_ai_analysis(data, themes, relationships, model)
+    summary_box, analysis_box = st.columns([0.42, 0.58])
+    with summary_box:
+        render_ai_card("Theme Summary", theme_summary_text)
+    with analysis_box:
+        render_ai_card("Theme Analysis", theme_analysis_text)
 
     render_theme_detail_cards(data, themes)
 
+    st.subheader("Human Review Workflow")
+    st.caption(
+        "Use this section to accept, rename, merge, split, reject, or annotate suggested themes before they become final."
+    )
+    with st.expander("Open human review workflow", expanded=False):
+        render_theme_review_editor(themes)
+    with st.expander("Update review decisions", expanded=False):
+        render_theme_review_controls(themes)
+
     st.subheader("Similar Risk Relationships")
-    if relationships.empty:
-        st.info("No similar-risk relationships met the selected threshold.")
-    else:
-        display = relationships.rename(
-            columns={
-                "Risk_ID": "Risk ID",
-                "Risk_Title": "Risk",
-                "Similar_Risk_ID": "Similar Risk ID",
-                "Similar_Risk_Title": "Similar Risk",
-                "Similarity_Score": "Score",
-                "Semantic_Similarity": "Semantic",
-                "Driver_Similarity": "Driver",
-                "Taxonomy_Alignment_Score": "Taxonomy",
-                "Business_Exposure_Score": "Business/Exposure",
-                "Mixed_Category_Warning": "Mixed Category",
-                "Same_Taxonomy_L1": "Same Taxonomy L1",
-                "Same_Metric": "Same Metric",
-                "Same_Method": "Same Method",
-            }
-        )
-        st.dataframe(display.head(120), width="stretch", hide_index=True)
+    st.caption(
+        "Open the relationship table to inspect the risk-to-risk evidence behind each suggested theme and confidence score."
+    )
+    with st.expander("Open similar risk relationship table", expanded=False):
+        if relationships.empty:
+            st.info("No similar-risk relationships met the selected threshold.")
+        else:
+            display = relationships.rename(
+                columns={
+                    "Risk_ID": "Risk ID",
+                    "Risk_Title": "Risk",
+                    "Similar_Risk_ID": "Similar Risk ID",
+                    "Similar_Risk_Title": "Similar Risk",
+                    "Similarity_Score": "Score",
+                    "Semantic_Similarity": "Title/Description",
+                    "Metric_Impact_Similarity": "Metric/Impact",
+                    "Taxonomy_Alignment_Score": "Taxonomy",
+                    "Driver_Similarity": "Driver",
+                    "Mixed_Category_Warning": "Mixed Category",
+                    "Same_Taxonomy_L1": "Same Taxonomy L1",
+                    "Same_Metric": "Same Metric",
+                    "Same_Method": "Same Method",
+                }
+            )
+            render_html_table(
+                display,
+                max_rows=120,
+                wide=True,
+                bar_columns={"Score", "Title/Description", "Metric/Impact", "Taxonomy", "Driver"},
+                bool_columns={"Mixed Category", "Same Taxonomy L1", "Same Metric", "Same Method"},
+            )
 
 
-def render_risk_table(data: pd.DataFrame) -> None:
+def render_risk_table(data: pd.DataFrame, columns: list[str] | None = None) -> None:
     """Render the associated-risk table used by the chatbot."""
-    available_columns = [column for column in RISK_TABLE_COLUMNS if column in data.columns]
+    source_columns = columns or RISK_TABLE_COLUMNS
+    available_columns = [column for column in source_columns if column in data.columns]
     register = data[available_columns].sort_values(
         ["Taxonomy_L1", "Risk_Title"],
         ascending=[True, True],
     )
-    st.dataframe(
-        register.rename(
-            columns={
-                "Group_ID": "ID",
-                "Taxonomy_L0": "Taxonomy L0",
-                "Taxonomy_L1": "Taxonomy L1",
-                "Taxonomy_L2": "Taxonomy L2",
-                "Risk_Title": "Risk",
-                "Risk_Status": "Status",
-                "Risk_Type": "Type",
-                "Business_Division": "Business Division",
-                "Risk_Metric": "Metric",
-                "Assessment_Method": "Method",
-                "Overall_Materiality": "Materiality",
-                "Likelihood_Rating": "Likelihood Rating",
-            }
-        ),
-        width="stretch",
-        hide_index=True,
-    )
+    render_html_table(register.rename(columns=RISK_TABLE_COLUMN_LABELS))
 
 
 def render_ai_chatbot(data: pd.DataFrame, model: str) -> None:

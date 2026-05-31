@@ -82,15 +82,190 @@ def inject_css() -> None:
             border-bottom-color: var(--accent);
             color: var(--accent);
         }
-        div[data-testid="stDataFrame"] {
+        .risk-table-wrap {
             border: 1px solid var(--line);
             border-radius: 8px;
-            background: var(--bg-card);
+            background: #fff;
+            max-height: 460px;
+            overflow: auto;
+            width: 100%;
+        }
+        .risk-table-wrap-wide {
+            overflow-x: auto;
+            overflow-y: auto;
+        }
+        .risk-html-table {
+            background: #fff;
+            border-collapse: separate;
+            border-spacing: 0;
+            color: var(--ink);
+            font-size: 0.82rem;
+            line-height: 1.35;
+            width: 100%;
+        }
+        .risk-table-wrap-wide .risk-html-table {
+            min-width: 1680px;
+            width: max-content;
+        }
+        .risk-html-table thead th {
+            background: var(--line-soft);
+            border-bottom: 1px solid var(--line);
+            color: var(--ink);
+            font-weight: 700;
+            padding: 0.56rem 0.68rem;
+            position: sticky;
+            text-align: left;
+            top: 0;
+            z-index: 1;
+        }
+        .risk-html-table tbody tr,
+        .risk-html-table tbody td {
+            background: #fff !important;
+        }
+        .risk-html-table tbody td {
+            border-bottom: 1px solid var(--line-soft);
+            color: var(--ink);
+            padding: 0.52rem 0.68rem;
+            vertical-align: top;
+        }
+        .risk-table-wrap-wide .risk-html-table th,
+        .risk-table-wrap-wide .risk-html-table td {
+            min-width: 130px;
+            white-space: nowrap;
+        }
+        .risk-table-wrap-wide .risk-html-table th:nth-child(2),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(2),
+        .risk-table-wrap-wide .risk-html-table th:nth-child(4),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(4),
+        .risk-table-wrap-wide .risk-html-table th:nth-child(5),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(5),
+        .risk-table-wrap-wide .risk-html-table th:nth-child(8),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(8),
+        .risk-table-wrap-wide .risk-html-table th:nth-child(10),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(10),
+        .risk-table-wrap-wide .risk-html-table th:nth-child(13),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(13),
+        .risk-table-wrap-wide .risk-html-table th:nth-child(14),
+        .risk-table-wrap-wide .risk-html-table td:nth-child(14) {
+            min-width: 240px;
+            white-space: normal;
+        }
+        .risk-html-table tbody tr:hover td {
+            background: #fff !important;
+        }
+        .score-bar-cell {
+            align-items: center;
+            display: flex;
+            gap: 0.5rem;
+            min-width: 116px;
+        }
+        .score-bar-track {
+            background: var(--line-soft);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            height: 7px;
+            min-width: 72px;
+            overflow: hidden;
+        }
+        .score-bar-fill {
+            background: var(--accent);
+            display: block;
+            height: 100%;
+        }
+        .score-bar-label {
+            color: var(--ink-soft);
+            font-size: 0.74rem;
+            font-variant-numeric: tabular-nums;
+            min-width: 2rem;
+        }
+        .bool-badge {
+            border-radius: 999px;
+            display: inline-block;
+            font-size: 0.68rem;
+            font-weight: 700;
+            line-height: 1;
+            min-width: 42px;
+            padding: 0.28rem 0.45rem;
+            text-align: center;
+            text-transform: uppercase;
+        }
+        .bool-badge-true {
+            background: #f8d7d7;
+            color: #9f2f2f;
+        }
+        .bool-badge-false {
+            background: var(--line-soft);
+            color: var(--ink-soft);
+        }
+        .review-controls-title {
+            color: var(--ink-soft);
+            font-size: 0.82rem;
+            font-weight: 700;
+            margin: 0.9rem 0 0.35rem;
+            text-transform: uppercase;
+        }
+        div[data-testid="stDataFrame"],
+        div[data-testid="stDataEditor"] {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #fff !important;
+            overflow: hidden;
+        }
+        div[data-testid="stDataFrame"] > div,
+        div[data-testid="stDataEditor"] > div {
+            background: var(--bg-card) !important;
+        }
+        div[data-testid="stDataFrame"] canvas,
+        div[data-testid="stDataEditor"] canvas,
+        div[data-testid="stDataFrame"] [role="grid"],
+        div[data-testid="stDataEditor"] [role="grid"],
+        div[data-testid="stDataFrame"] [role="rowgroup"],
+        div[data-testid="stDataEditor"] [role="rowgroup"],
+        div[data-testid="stDataFrame"] [role="row"],
+        div[data-testid="stDataEditor"] [role="row"],
+        div[data-testid="stDataFrame"] [role="gridcell"],
+        div[data-testid="stDataEditor"] [role="gridcell"] {
+            background: #fff !important;
+        }
+        div[data-testid="stDataFrame"] [role="columnheader"],
+        div[data-testid="stDataEditor"] [role="columnheader"],
+        div[data-testid="stDataFrame"] thead th,
+        div[data-testid="stDataEditor"] thead th {
+            background: var(--line-soft) !important;
+            color: var(--ink) !important;
+        }
+        div[data-testid="stDataFrame"] tbody tr,
+        div[data-testid="stDataFrame"] tbody td,
+        div[data-testid="stDataEditor"] tbody tr,
+        div[data-testid="stDataEditor"] tbody td {
+            background: #fff !important;
+            color: var(--ink) !important;
         }
         div[data-testid="stExpander"] {
             background: var(--bg-card);
             border-color: var(--line) !important;
             border-radius: 8px;
+        }
+        div[data-testid="stExpander"] details,
+        details[data-testid="stExpander"] {
+            background: var(--bg-card) !important;
+            border-color: var(--line) !important;
+            border-radius: 8px;
+        }
+        div[data-testid="stExpander"] summary,
+        details[data-testid="stExpander"] summary,
+        div[data-testid="stExpander"] details > summary {
+            background: var(--line-soft) !important;
+            border-radius: 8px;
+        }
+        div[data-testid="stExpander"] summary:hover,
+        details[data-testid="stExpander"] summary:hover,
+        div[data-testid="stExpander"] details:hover > summary {
+            background: var(--line) !important;
+        }
+        div[data-testid="stExpander"] summary *,
+        details[data-testid="stExpander"] summary * {
+            background: transparent !important;
         }
         .taxonomy-card {
             border: 1px solid var(--line);
