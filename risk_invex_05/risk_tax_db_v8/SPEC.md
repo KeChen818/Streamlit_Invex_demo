@@ -1,8 +1,8 @@
-# Risk Taxonomy Dashboard Specification
+# Risk Taxonomy Grouping Specification
 
 ## Purpose
 
-The Risk Taxonomy Dashboard helps users review a flat risk inventory by Taxonomy L1 group, compare how risk methods and metrics are used, classify suggested AI Risk Themes, and ask natural-language questions about the filtered inventory.
+Risk Taxonomy Grouping helps users review a flat risk inventory by Taxonomy L1 group, compare how risk methods and metrics are used, classify suggested AI Risk Themes, and ask natural-language questions about the filtered inventory.
 
 The application is an internal analytical template, not a regulatory reporting system. It prioritizes explainable grouping, count-based comparison, and transparent links back to the underlying risk records.
 
@@ -44,6 +44,10 @@ Recommended:
 - `Taxonomy_L0`
 - `Taxonomy_L2`
 - `Risk_Description`
+- `Root_Cause_L0`
+- `Root_Cause_L1`
+- `Root_Cause_Comment`
+- `Early_Warning_Sign(EWS)`
 - `Overall_Materiality`
 - `Likelihood_Rating`
 - `Risk_Exposure`
@@ -56,14 +60,15 @@ Recommended:
 
 The sidebar provides slicers for:
 
-- Reporting quarter
-- Taxonomy L0
-- Taxonomy L1 group
-- Business division
+- SubLegal entity
 - Risk type
-- Materiality
-- Status
-- Search
+- Taxonomy L0
+- Business division
+- GCRS
+- Overall materiality
+- Group ID / Risk title lookup
+
+`Risk Type` defaults to `Financial` when that value is available in the inventory.
 
 All dashboard tabs and pages operate on the currently filtered data.
 
@@ -115,17 +120,31 @@ The AI layer may add:
 - Similar Risk Relationships
 - Emerging Clusters
 - Cross-business linkage
+- Key drivers
+- Confidence score
+- Governance review flag
 
 The page must show:
 
-- Controls for top-K similar risks, relationship threshold, and theme cluster threshold.
-- Count metrics for suggested themes, similar relationships, cross-business themes, and emerging clusters.
+- Controls for target theme count maximum, top-K similar risks, and relationship threshold.
+- Count metrics for suggested themes, similar relationships, material risks, and non-material risks.
 - AI Theme Analysis narrative.
-- Bar chart of suggested theme counts.
-- QoQ theme count chart when `Reporting_Quarter` data exists.
+- Bar chart of suggested theme counts stacked by direct `Overall_Materiality` count; no AI materiality classification is applied.
+- Business Division and GCRS count ring charts.
 - Human Review Workflow table.
-- Theme detail expanders with mapped risks.
+- Theme detail expanders with structured summary bullets and mapped risks.
 - Similar Risk Relationships table.
+
+Theme grouping must use a hybrid score led by title/description semantics instead of taxonomy alone:
+
+- Risk title and risk description semantic similarity: 50%
+- Risk metric and impact-comment similarity: 25%
+- Taxonomy alignment: 15%
+- Risk driver/root-cause similarity: 10%
+
+Suggested themes with confidence below `0.50`, fewer than 2 risks, or zero average internal similarity must be excluded from the AI summary, charts, human review workflow, and detail cards. Theme summaries must include the confidence rationale so the score is connected to the evidence used for grouping.
+
+When available, the embedding layer uses LangChain `OpenAIEmbeddings` with `text-embedding-3-large` and a FAISS vector store. If those dependencies or `OPENAI_API_KEY` are unavailable, the app must fall back to local deterministic embeddings.
 
 Theme candidate threshold bands:
 
@@ -151,13 +170,13 @@ Risk Inventory Source
         ↓
 Data Standardization
         ↓
-Semantic Payload Construction
+Weighted Semantic Payload Construction
         ↓
 Local Embedding Generation
         ↓
 Similarity Search
         ↓
-Theme Clustering
+Target-Count Theme Clustering
         ↓
 GPT Theme Narrative
         ↓
@@ -172,14 +191,16 @@ Each risk is represented with:
 
 ```text
 Risk ID
-Risk Name
+Risk Name, highest-weight grouping signal
 Risk Description
-Risk Driver / Exposure
-Business Division
+Risk Metric / Impact Comment
 Taxonomy L1 / Taxonomy L2
-Risk Metric
-Assessment Method
+Root Cause Driver
 ```
+
+For 300+ risk records, the page should default to an executive-level target near 25 suggested themes. Users may adjust the target count when they need tighter or broader grouping.
+
+After target-count clustering, duplicate `Taxonomy_L1` / `Taxonomy_L2` / `Root_Cause_L0` / `Root_Cause_L1` / stable `Common_Topic` signatures should be merged and any remaining duplicate labels should receive concise differentiators. `Common_Topic` should be derived from repeated title/description wording across multiple records, not from one individual title. `Root_Cause_Comment` and `Early_Warning_Sign(EWS)` should enrich summaries instead of splitting themes. `Risk_Metric` and `Impact_Comment` should support the secondary grouping score, while `Assessment_Method` remains a supporting review field.
 
 #### Theme Mapping Output
 
@@ -188,6 +209,7 @@ The app must produce theme records with:
 - `Theme_ID`
 - `Theme_Name`
 - `Theme_Summary`
+- `Common_Topic`
 - `Taxonomy_Alignment`
 - `Business_Divisions`
 - `Risk_Count`
@@ -306,7 +328,7 @@ The app should remain modular:
 - `risk_dashboard/analysis.py`: deterministic analytics and fallback narratives.
 - `risk_dashboard/ai.py`: OpenAI calls and chatbot logic.
 - `risk_dashboard/bootstrap.py`: shared inventory load and sidebar filter setup.
-- `risk_dashboard/themes.py`: semantic payloads, local embeddings, similarity relationships, theme clustering, QoQ theme counts, and review fields.
+- `risk_dashboard/themes.py`: semantic payloads, optional OpenAI/FAISS embeddings, hybrid similarity relationships, theme clustering, Business Division/GCRS count summaries, and review fields.
 - `risk_dashboard/views.py`: Streamlit rendering.
 - `risk_dashboard/utils.py`: small shared helpers.
 
@@ -317,7 +339,7 @@ The app should remain modular:
 - The front end does not display model name, API key status, or file source.
 - Taxonomy L1 summary works from filtered data.
 - Method and Metric Compare uses ring charts.
-- AI Theme Classification produces suggested themes, similarity relationships, QoQ counts, and reviewer actions.
+- AI Theme Classification produces suggested themes, similarity relationships, Business Division/GCRS count charts, and reviewer actions.
 - AI Chatbot filters the associated-risk table by returned or fallback `Group_ID`s.
 - No dashboard page analyzes `Impact_Numbers`.
 - Python files compile successfully.
