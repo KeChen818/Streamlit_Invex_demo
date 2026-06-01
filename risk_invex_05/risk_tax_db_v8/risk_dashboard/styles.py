@@ -128,6 +128,25 @@ def inject_css() -> None:
             padding: 0.52rem 0.68rem;
             vertical-align: top;
         }
+        .risk-html-table .col-taxonomy-l1 {
+            font-weight: 700;
+            min-width: 150px;
+        }
+        .risk-html-table .col-risks {
+            color: var(--ink);
+            font-variant-numeric: tabular-nums;
+            font-weight: 700;
+            text-align: right;
+            white-space: nowrap;
+        }
+        .risk-html-table .col-associated-sublegal-entity,
+        .risk-html-table .col-associated-business-division,
+        .risk-html-table .col-metrics,
+        .risk-html-table .col-methods {
+            max-width: 260px;
+            min-width: 180px;
+            white-space: normal;
+        }
         .risk-table-wrap-wide .risk-html-table th,
         .risk-table-wrap-wide .risk-html-table td {
             min-width: 130px;

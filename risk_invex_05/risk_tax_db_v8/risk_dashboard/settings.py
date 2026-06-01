@@ -3,8 +3,9 @@
 from pathlib import Path
 
 
-APP_TITLE = "Risk Taxonomy Dashboard"
+APP_TITLE = "Risk Taxonomy Grouping"
 DEFAULT_MODEL = "gpt-5.2"
+CHAT_ASSOCIATED_RISK_LIMIT = 300
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = PROJECT_ROOT / "data" / "inventory.JSON"
 
@@ -21,6 +22,10 @@ EXPECTED_COLUMNS = [
     "Taxonomy_L2",
     "Risk_Title",
     "Risk_Description",
+    "Root_Cause_L0",
+    "Root_Cause_L1",
+    "Root_Cause_Comment",
+    "Early_Warning_Sign(EWS)",
     "Overall_Materiality",
     "Likelihood_Rating",
     "Likelihood_Comment",
@@ -47,6 +52,10 @@ SEARCH_COLUMNS = [
     "Taxonomy_L0",
     "Taxonomy_L1",
     "Taxonomy_L2",
+    "Root_Cause_L0",
+    "Root_Cause_L1",
+    "Root_Cause_Comment",
+    "Early_Warning_Sign(EWS)",
     "Risk_Metric",
     "Assessment_Method",
     "Business_Division",
@@ -66,6 +75,10 @@ AI_CONTEXT_COLUMNS = [
     "Taxonomy_L2",
     "Risk_Title",
     "Risk_Description",
+    "Root_Cause_L0",
+    "Root_Cause_L1",
+    "Root_Cause_Comment",
+    "Early_Warning_Sign(EWS)",
     "Overall_Materiality",
     "Likelihood_Rating",
     "Risk_Metric",

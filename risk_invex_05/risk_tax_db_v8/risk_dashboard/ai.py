@@ -14,7 +14,7 @@ except Exception:
     OpenAI = None
 
 from .analysis import build_compare_fallback_analysis, build_taxonomy_fallback_summary
-from .settings import AI_CONTEXT_COLUMNS, DEFAULT_MODEL
+from .settings import AI_CONTEXT_COLUMNS, CHAT_ASSOCIATED_RISK_LIMIT, DEFAULT_MODEL
 from .themes import build_theme_fallback_sections
 from .utils import format_top_counts, top_counts
 
@@ -34,6 +34,21 @@ def build_inventory_context(data: pd.DataFrame, limit: int = 80) -> str:
     columns = [column for column in AI_CONTEXT_COLUMNS if column in data.columns]
     records = data[columns].head(limit).to_dict(orient="records")
     return json.dumps(records, ensure_ascii=False, indent=2)
+
+
+def format_chat_history(messages: list[dict[str, str]] | None, limit: int = 8) -> str:
+    """Condense recent chatbot messages for follow-up question context."""
+    if not messages:
+        return "No previous messages in this chat."
+
+    lines = []
+    for message in messages[-limit:]:
+        role = str(message.get("role", "message")).strip().title()
+        content = re.sub(r"\s+", " ", str(message.get("content", ""))).strip()
+        if len(content) > 900:
+            content = content[:900].rsplit(" ", 1)[0] + "..."
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines) if lines else "No previous messages in this chat."
 
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -227,11 +242,38 @@ def parse_json_object(text: str) -> dict[str, Any]:
         raise
 
 
-def fallback_inventory_answer(data: pd.DataFrame, question: str) -> tuple[str, list[str]]:
+def fallback_inventory_answer(
+    data: pd.DataFrame,
+    question: str,
+    prior_group_ids: list[str] | None = None,
+    max_ids: int = CHAT_ASSOCIATED_RISK_LIMIT,
+) -> tuple[str, list[str]]:
     """Answer and filter by keyword matching when GPT chat is unavailable."""
     clean_question = question.strip().lower()
-    search_columns = [column for column in AI_CONTEXT_COLUMNS if column in data.columns]
-    searchable = data[search_columns].astype(str).agg(" ".join, axis=1).str.lower()
+    valid_ids = set(data["Group_ID"].astype(str).tolist())
+    clean_prior_ids = [str(group_id) for group_id in (prior_group_ids or []) if str(group_id) in valid_ids]
+    contextual_terms = {
+        "those",
+        "these",
+        "same",
+        "previous",
+        "above",
+        "them",
+        "they",
+        "their",
+        "scope",
+        "within",
+        "filter",
+        "narrow",
+        "also",
+    }
+    uses_prior_scope = bool(clean_prior_ids) and any(term in clean_question for term in contextual_terms)
+    search_data = data[data["Group_ID"].astype(str).isin(clean_prior_ids)] if uses_prior_scope else data
+    if search_data.empty:
+        search_data = data
+
+    search_columns = [column for column in AI_CONTEXT_COLUMNS if column in search_data.columns]
+    searchable = search_data[search_columns].astype(str).agg(" ".join, axis=1).str.lower()
 
     tokens = [
         token
@@ -262,60 +304,77 @@ def fallback_inventory_answer(data: pd.DataFrame, question: str) -> tuple[str, l
         mask = strict_mask if strict_mask.any() else searchable.apply(
             lambda value: any(token in value for token in tokens)
         )
-        matched = data[mask]
+        matched = search_data[mask]
     else:
-        matched = data
+        matched = search_data
 
     if matched.empty:
-        matched = data
+        matched = search_data if uses_prior_scope else data
 
     group_counts = format_top_counts(top_counts(matched["Taxonomy_L1"], limit=3))
     metric_counts = format_top_counts(top_counts(matched["Risk_Metric"], limit=3))
     method_counts = format_top_counts(top_counts(matched["Assessment_Method"], limit=3))
-    ids = matched["Group_ID"].head(25).tolist()
+    ids = matched["Group_ID"].astype(str).head(max_ids).tolist()
+    scope_phrase = " from the prior discussed scope" if uses_prior_scope else ""
     answer = (
-        f"I found **{len(matched)} associated risks** in the current filtered inventory. "
+        f"I found **{len(matched)} associated risks**{scope_phrase} in the current filtered inventory. "
         f"Top Taxonomy L1 groups: {group_counts}. Top metrics: {metric_counts}. "
         f"Top methods: {method_counts}."
     )
     return answer, ids
 
 
-def ask_inventory_chatbot(data: pd.DataFrame, question: str, model: str) -> tuple[str, list[str]]:
+def ask_inventory_chatbot(
+    data: pd.DataFrame,
+    question: str,
+    model: str,
+    chat_history: list[dict[str, str]] | None = None,
+    prior_group_ids: list[str] | None = None,
+    max_ids: int = CHAT_ASSOCIATED_RISK_LIMIT,
+) -> tuple[str, list[str]]:
     """Answer an inventory question and return associated Group_ID values."""
-    fallback_answer, fallback_ids = fallback_inventory_answer(data, question)
+    fallback_answer, fallback_ids = fallback_inventory_answer(data, question, prior_group_ids, max_ids)
     if not openai_is_configured():
         return fallback_answer, fallback_ids
 
     valid_ids = set(data["Group_ID"].astype(str).tolist())
+    clean_prior_ids = [str(group_id) for group_id in (prior_group_ids or []) if str(group_id) in valid_ids]
     system_prompt = (
         "You are a risk inventory chatbot. Answer only from the provided inventory records. "
         "Do not invent records, IDs, counts, divisions, methods, metrics, or commentary. "
         "Do not analyze or aggregate Impact_Numbers. "
+        "Use the recent conversation and previous associated Group_ID scope to resolve follow-up questions. "
         "Return JSON only with keys: answer_markdown, matching_group_ids. "
-        "matching_group_ids must contain only Group_ID values from the provided records and should drive a filtered table."
+        "matching_group_ids must contain only Group_ID values from the provided records and should drive a filtered table. "
+        f"Return up to {max_ids} matching_group_ids when the question describes a broad scope."
     )
     user_prompt = f"""
 User question:
 {question}
 
+Recent chat history:
+{format_chat_history(chat_history)}
+
+Previous associated table Group_ID scope:
+{json.dumps(clean_prior_ids[:max_ids], ensure_ascii=False)}
+
 Filtered risk inventory records:
-{build_inventory_context(data)}
+{build_inventory_context(data, limit=max_ids)}
 
 Return JSON only:
 {{
   "answer_markdown": "short Markdown answer grounded in the records",
-  "matching_group_ids": ["Group_ID values for the risks most associated with the answer"]
+  "matching_group_ids": ["Group_ID values for the risks most associated with the answer and current discussed scope"]
 }}
 """
 
     try:
-        raw = request_openai_text(model, system_prompt, user_prompt, 1200)
+        raw = request_openai_text(model, system_prompt, user_prompt, 4000)
         payload = parse_json_object(raw)
         answer = str(payload.get("answer_markdown") or "").strip() or fallback_answer
         ids = [str(group_id) for group_id in payload.get("matching_group_ids", []) if str(group_id) in valid_ids]
         if not ids:
             ids = fallback_ids
-        return answer, ids[:50]
+        return answer, ids[:max_ids]
     except Exception:
         return fallback_answer + "\n\n_Local fallback used because live chat is unavailable._", fallback_ids

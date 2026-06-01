@@ -12,7 +12,7 @@ from .ai import (
     get_taxonomy_ai_summary,
     get_theme_ai_analysis,
 )
-from .settings import RISK_TABLE_COLUMNS
+from .settings import CHAT_ASSOCIATED_RISK_LIMIT, RISK_TABLE_COLUMNS
 from .themes import THEME_REVIEW_ACTIONS, build_theme_classification
 from .utils import unique_join
 
@@ -160,15 +160,27 @@ def metric_cards(data: pd.DataFrame) -> None:
 
 def render_group_summary(data: pd.DataFrame, group_summary: pd.DataFrame, model: str) -> None:
     """Render Taxonomy L1 charts, GPT summary, and risk popover cards."""
+    chart_summary = group_summary.head(15).copy()
+    max_risk_count = float(chart_summary["Risk_Count"].max()) if not chart_summary.empty else 1.0
+    x_domain_max = max(1.0, max_risk_count * 1.18)
     left, right = st.columns([0.48, 0.52])
 
     with left:
-        chart = (
-            alt.Chart(group_summary)
-            .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3)
+        base = (
+            alt.Chart(chart_summary)
             .encode(
-                x=alt.X("Risk_Count:Q", title="Risk count", axis=alt.Axis(tickMinStep=1)),
+                x=alt.X(
+                    "Risk_Count:Q",
+                    title="Risk count",
+                    axis=alt.Axis(tickMinStep=1),
+                    scale=alt.Scale(domain=[0, x_domain_max]),
+                ),
                 y=alt.Y("Taxonomy_L1:N", title=None, sort="-x"),
+            )
+        )
+        bars = (
+            base.mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3)
+            .encode(
                 color=alt.Color(
                     "Risk_Count:Q",
                     scale=alt.Scale(range=["#f0c9c4", "#d64545"]),
@@ -181,17 +193,29 @@ def render_group_summary(data: pd.DataFrame, group_summary: pd.DataFrame, model:
                     alt.Tooltip("L2_Count:Q", title="Taxonomy L2"),
                 ],
             )
-            .properties(height=max(260, 34 * len(group_summary)))
+        )
+        labels = base.mark_text(
+            align="left",
+            baseline="middle",
+            color="#3a3630",
+            dx=6,
+            fontSize=12,
+            fontWeight="bold",
+        ).encode(text=alt.Text("Risk_Count:Q", format=",d"))
+        chart = (
+            (bars + labels)
+            .properties(height=max(260, 34 * len(chart_summary)))
         )
         st.altair_chart(chart, width="stretch")
+        st.caption(f"Showing top {len(chart_summary):,} Taxonomy L1 groups by risk count.")
 
     with right:
         display = group_summary[
             [
                 "Taxonomy_L1",
                 "Risk_Count",
-                "Material_Risks",
-                "L2_Count",
+                "Associated_SubLegal_Entity",
+                "Associated_Business_Division",
                 "Metrics",
                 "Methods",
             ]
@@ -199,8 +223,8 @@ def render_group_summary(data: pd.DataFrame, group_summary: pd.DataFrame, model:
             columns={
                 "Taxonomy_L1": "Taxonomy L1",
                 "Risk_Count": "Risks",
-                "Material_Risks": "Material",
-                "L2_Count": "Taxonomy L2",
+                "Associated_SubLegal_Entity": "Associated SubLegal Entity",
+                "Associated_Business_Division": "Associated Business Division",
             }
         )
         render_html_table(display)
@@ -769,7 +793,11 @@ def render_theme_classification(data: pd.DataFrame, model: str, show_heading: bo
             )
 
 
-def render_risk_table(data: pd.DataFrame, columns: list[str] | None = None) -> None:
+def render_risk_table(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    max_rows: int | None = None,
+) -> None:
     """Render the associated-risk table used by the chatbot."""
     source_columns = columns or RISK_TABLE_COLUMNS
     available_columns = [column for column in source_columns if column in data.columns]
@@ -777,7 +805,7 @@ def render_risk_table(data: pd.DataFrame, columns: list[str] | None = None) -> N
         ["Taxonomy_L1", "Risk_Title"],
         ascending=[True, True],
     )
-    render_html_table(register.rename(columns=RISK_TABLE_COLUMN_LABELS))
+    render_html_table(register.rename(columns=RISK_TABLE_COLUMN_LABELS), max_rows=max_rows)
 
 
 def render_ai_chatbot(data: pd.DataFrame, model: str) -> None:
@@ -789,11 +817,11 @@ def render_ai_chatbot(data: pd.DataFrame, model: str) -> None:
     if "risk_chat_messages" not in st.session_state:
         st.session_state.risk_chat_messages = []
     if "risk_chat_selected_ids" not in st.session_state:
-        st.session_state.risk_chat_selected_ids = data["Group_ID"].head(25).tolist()
+        st.session_state.risk_chat_selected_ids = data["Group_ID"].astype(str).head(CHAT_ASSOCIATED_RISK_LIMIT).tolist()
 
     if st.button("Clear chat"):
         st.session_state.risk_chat_messages = []
-        st.session_state.risk_chat_selected_ids = data["Group_ID"].head(25).tolist()
+        st.session_state.risk_chat_selected_ids = data["Group_ID"].astype(str).head(CHAT_ASSOCIATED_RISK_LIMIT).tolist()
         st.rerun()
 
     for message in st.session_state.risk_chat_messages:
@@ -802,20 +830,39 @@ def render_ai_chatbot(data: pd.DataFrame, model: str) -> None:
 
     prompt = st.chat_input("Ask about groups, divisions, GCRS, methods, metrics, or assumptions")
     if prompt:
+        prior_messages = st.session_state.risk_chat_messages[-8:]
+        prior_scope = st.session_state.risk_chat_selected_ids
         st.session_state.risk_chat_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                answer, ids = ask_inventory_chatbot(data, prompt, model)
+                answer, ids = ask_inventory_chatbot(
+                    data,
+                    prompt,
+                    model,
+                    chat_history=prior_messages,
+                    prior_group_ids=prior_scope,
+                    max_ids=CHAT_ASSOCIATED_RISK_LIMIT,
+                )
             st.markdown(answer)
 
-        st.session_state.risk_chat_messages.append({"role": "assistant", "content": answer})
+        st.session_state.risk_chat_messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "matching_group_ids": ids,
+            }
+        )
         st.session_state.risk_chat_selected_ids = ids
 
-    valid_ids = set(data["Group_ID"])
+    valid_ids = set(data["Group_ID"].astype(str))
     selected_ids = [group_id for group_id in st.session_state.risk_chat_selected_ids if group_id in valid_ids]
-    associated = data[data["Group_ID"].isin(selected_ids)] if selected_ids else data
+    associated = data[data["Group_ID"].astype(str).isin(selected_ids)] if selected_ids else data
     st.subheader(f"Associated Risks ({len(associated)})")
-    render_risk_table(associated)
+    st.caption(
+        f"Table follows the latest discussed Group ID scope from the chat. "
+        f"Up to {CHAT_ASSOCIATED_RISK_LIMIT:,} associated risks are shown from the current sidebar filters."
+    )
+    render_risk_table(associated, max_rows=CHAT_ASSOCIATED_RISK_LIMIT)
